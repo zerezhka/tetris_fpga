@@ -293,7 +293,7 @@ diff. This caught a real RTL bug immediately: `HT4BIT._halt` also calls
 all 6 real ROMs match bit-exact over 200k instructions including sound
 engine state (`sim/regression.py`).
 
-### Phase 7: Full ROM Verification (Week 8-10)
+### Phase 7: Full ROM Verification (Week 8-10) — DONE
 
 Run all 8 HT943 ROMs. Each must boot and play for 5 minutes without PC trace divergence.
 
@@ -307,6 +307,27 @@ Run all 8 HT943 ROMs. Each must boot and play for 5 minutes without PC trace div
 | **E23PlusMarkII96in1** | **P2** | **The main event — Tetris** |
 | ~~MameGalaxian~~ | — | .bin not in BrickEmuPy |
 | ~~MameTamagotch~~ | — | .bin not in BrickEmuPy |
+
+"5 minutes" is a wall-clock figure, but HT4BIT instructions take a
+variable 4-or-8 cycles each depending on opcode mix, so converting that to
+an exact instruction count from a ROM's clock rate would just be a guess
+anyway. `sim/phase7_verify.py` instead runs each of the 6 available real
+ROMs for a flat 5,000,000 instructions (25x the Phase 0-6 spot-check
+length) — long enough to exercise sustained gameplay, menu loops, timer
+wraparounds, and any accumulated drift.
+
+At this length the full per-instruction trace would run into the
+gigabytes per ROM (each line is ~100 bytes), so nothing is written to
+disk: the BrickEmuPy and RTL processes are both launched as subprocesses
+and their stdout streamed line-by-line through the same True/False-vs-1/0
+normalization `diff_trace.py` already uses, stopping at the first
+divergence (or confirming the full run matched).
+
+**Result: all 6 ROMs PASS, 5,000,000 instructions each, zero divergence**
+across every field the trace carries — PC/opcode/registers/flags and the
+Phase 6 sound-engine state — 25x longer than the Phase 0-6 spot checks.
+(LCD segment RAM itself isn't part of the per-instruction trace line;
+that's still verified separately by Phase 5's `sim/render_compare.py`.)
 
 ### Phase 8: MiSTer Integration (Week 10-12)
 
