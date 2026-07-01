@@ -57,7 +57,11 @@ module ht943_core #(
     // block-RAM inference entirely.
     (* ramstyle = "logic" *) logic [3:0] ram [0:255];
 
-    assign pc   = r_pc;
+    // Trace outputs reflect the address/opcode actually about to execute,
+    // which is cur_pc/op (post interrupt-redirect) rather than r_pc: an
+    // interrupt entry and the first instruction at its vector both retire
+    // in the same cycle here, mirroring BrickEmuPy's HT4BIT.clock().
+    assign pc   = cur_pc;
     assign acc  = r_acc;
     assign wr0  = r_wr[0];
     assign wr1  = r_wr[1];
@@ -70,7 +74,7 @@ module ht943_core #(
     assign tf   = r_tf;
     assign ef   = r_ef;
     assign halt = r_halt;
-    assign opcode = r_halt ? 8'hFF : rom[r_pc];
+    assign opcode = r_halt ? 8'hFF : op;
 
     function automatic [7:0] ram_addr_of(input int rp);
         ram_addr_of = {r_wr[rp+1], r_wr[rp]};

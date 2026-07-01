@@ -3,7 +3,13 @@
 Headless HT943 runner — dumps per-instruction trace to stdout.
 
 Usage:
-    python3 run_headless.py <path/to/device.brick> [num_instructions]
+    python3 run_headless.py <path/to/device.brick> [num_instructions] \
+        [button:press_at:release_at ...]
+
+    button:press_at:release_at presses a button (by name, as declared in the
+    .brick's "buttons"/"peripherals.direct_input" sections, e.g. btnStart)
+    at instruction `press_at` and releases it at instruction `release_at`.
+    Several such triples may be given to script multiple button events.
 
 Output (one line per instruction, before execution):
     N PC=XXX OP=XX A=X R0=X R1=X R2=X R3=X R4=X CF=X TC=XX EI=X TF=X EF=X HALT=X
@@ -35,13 +41,24 @@ def load_brick(brick_path):
         cfg = json.load(f)
     mask = cfg['mask_options'].copy()
     mask['rom_path'] = os.path.normpath(os.path.join(brick_root, mask['rom_path']))
-    if 'sound_rom_path' in mask:
+    if mask.get('sound_rom_path') is not None:
         mask['sound_rom_path'] = os.path.normpath(os.path.join(brick_root, mask['sound_rom_path']))
-    return mask, cfg['clock']
+    direct_input = cfg.get('peripherals', {}).get('direct_input', {})
+    return mask, cfg['clock'], direct_input
 
 
-def run(brick_path, n_instructions):
-    mask, clock = load_brick(brick_path)
+def parse_presses(args, direct_input):
+    presses = []
+    for arg in args:
+        button, press_at, release_at = arg.split(':')
+        if button not in direct_input:
+            raise ValueError(f"unknown button {button!r}; known: {sorted(direct_input)}")
+        presses.append((button, int(press_at), int(release_at)))
+    return presses
+
+
+def run(brick_path, n_instructions, presses=()):
+    mask, clock, direct_input = load_brick(brick_path)
     interconnect = Interconnect(_StubEmulator())
     cpu = HT943(mask, clock, interconnect)
     cpu.reset()
@@ -49,6 +66,15 @@ def run(brick_path, n_instructions):
     rom = cpu.get_ROM()
 
     for i in range(n_instructions):
+        for button, press_at, release_at in presses:
+            port = direct_input[button]['port']
+            btn_mask = direct_input[button]['mask']
+            level = direct_input[button]['level']
+            if i == press_at:
+                interconnect.emit_port(None, port, btn_mask, level)
+            elif i == release_at:
+                interconnect.emit_port(None, port, btn_mask, -1)
+
         # HT4BIT.clock() fuses interrupt-entry PC redirection with the fetch
         # of the first instruction at the vector in the same call, so the
         # opcode it is about to execute is not always the byte at cpu.pc().
@@ -86,4 +112,6 @@ if __name__ == '__main__':
         sys.exit(1)
     brick = sys.argv[1]
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 10000
-    run(brick, n)
+    _, _, direct_input = load_brick(brick)
+    presses = parse_presses(sys.argv[3:], direct_input)
+    run(brick, n, presses)
