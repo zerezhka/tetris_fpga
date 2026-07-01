@@ -12,6 +12,9 @@ Exits 0 if identical, 1 if different.
 import sys
 
 
+_BOOL_NORM = {'True': '1', 'False': '0'}
+
+
 def parse_line(line):
     """Return dict of field→value, or None for blank/comment lines."""
     line = line.strip()
@@ -22,7 +25,9 @@ def parse_line(line):
     fields['_n'] = parts[0]
     for token in parts[1:]:
         k, v = token.split('=')
-        fields[k] = v
+        # BrickEmuPy sometimes stores flags as Python bool (CF = ACC > 15),
+        # which prints as True/False instead of 1/0 — same value, normalize.
+        fields[k] = _BOOL_NORM.get(v, v)
     return fields
 
 
