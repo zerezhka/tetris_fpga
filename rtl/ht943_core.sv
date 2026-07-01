@@ -25,7 +25,16 @@ module ht943_core #(
     parameter logic [3:0] PS_PULLUP = 4'hF,
     parameter logic [3:0] PP_WAKEUP = 4'h0,
     parameter logic [3:0] PM_WAKEUP = 4'h0,
-    parameter logic [3:0] PS_WAKEUP = 4'h0
+    parameter logic [3:0] PS_WAKEUP = 4'h0,
+    // Sound engine (Phase 6) — mirrors HT4BITsound.py exactly. Real audio
+    // synthesis (freq in Hz, sine/noise shaping) is a BrickEmuPy-side
+    // playback embellishment, not chip behavior; the actual hardware-
+    // relevant, bit-exact state is which sROM byte is selected per
+    // channel/note step, which is what these ports/regs track.
+    parameter SOUND_ROM_HEX_FILE = "",
+    parameter SPEED_DIV_HEX_FILE = "",
+    parameter EFFECT_HEX_FILE = "",
+    parameter int SOUND_FREQ_DIV = 64
 ) (
     input  logic        clk,
     input  logic         rst,
@@ -45,7 +54,16 @@ module ht943_core #(
     // comparison). Same 256x4bit array the CPU uses for ordinary MOV
     // instructions — HT943 has no separate display RAM, see HT943.get_VRAM().
     input  logic [7:0]  dbg_ram_addr,
-    output logic [3:0]  dbg_ram_data
+    output logic [3:0]  dbg_ram_data,
+
+    // Sound engine trace outputs (Phase 6) — same "state as of before
+    // this instruction executes" convention as pc/opcode/acc/etc above.
+    output logic        snd_on,
+    output logic        snd_repeat,
+    output logic [3:0]  snd_channel,
+    output logic [5:0]  snd_note_ctr,
+    output logic [7:0]  snd_note,
+    output logic        snd_fx
 );
 
     logic [7:0] rom [0:4095];
@@ -53,6 +71,40 @@ module ht943_core #(
         if (ROM_HEX_FILE != "")
             $readmemh(ROM_HEX_FILE, rom);
     end
+
+    // Sound ROM (20 channels x 32 bytes, see HT4BITsound.py SROM_SIZE) and
+    // the per-channel speed_div/effect tables from the .brick's mask_options
+    // (there are only 16 of each since channel/ACC select is 4-bit).
+    logic [7:0] sound_rom  [0:639];
+    logic [7:0] speed_div  [0:15];
+    logic [7:0] sound_fx   [0:15];
+    initial begin
+        if (SOUND_ROM_HEX_FILE != "") $readmemh(SOUND_ROM_HEX_FILE, sound_rom);
+        if (SPEED_DIV_HEX_FILE != "") $readmemh(SPEED_DIV_HEX_FILE, speed_div);
+        if (EFFECT_HEX_FILE    != "") $readmemh(EFFECT_HEX_FILE, sound_fx);
+    end
+
+    // HT4BITsound.py's LFSR2DIV table — converts a raw sROM note byte into
+    // a clock-divider ratio. Fixed hardware/firmware constant, never varies
+    // per-ROM, so it's embedded directly rather than loaded from a file.
+    localparam logic [7:0] LFSR2DIV [0:127] = '{
+        8'd0,   8'd2,   8'd123, 8'd3,   8'd124, 8'd75,  8'd117, 8'd4,
+        8'd125, 8'd101, 8'd111, 8'd76,  8'd118, 8'd42,  8'd69,  8'd5,
+        8'd126, 8'd66,  8'd63,  8'd102, 8'd112, 8'd86,  8'd36,  8'd77,
+        8'd119, 8'd21,  8'd95,  8'd43,  8'd70,  8'd25,  8'd105, 8'd6,
+        8'd127, 8'd115, 8'd99,  8'd67,  8'd64,  8'd34,  8'd19,  8'd103,
+        8'd113, 8'd17,  8'd15,  8'd87,  8'd37,  8'd55,  8'd89,  8'd78,
+        8'd120, 8'd39,  8'd60,  8'd22,  8'd96,  8'd52,  8'd57,  8'd44,
+        8'd71,  8'd91,  8'd30,  8'd26,  8'd106, 8'd47,  8'd80,  8'd7,
+        8'd1,   8'd122, 8'd74,  8'd116, 8'd100, 8'd110, 8'd41,  8'd68,
+        8'd65,  8'd62,  8'd85,  8'd35,  8'd20,  8'd94,  8'd24,  8'd104,
+        8'd114, 8'd98,  8'd33,  8'd18,  8'd16,  8'd14,  8'd54,  8'd88,
+        8'd38,  8'd59,  8'd51,  8'd56,  8'd90,  8'd29,  8'd46,  8'd79,
+        8'd121, 8'd73,  8'd109, 8'd40,  8'd61,  8'd84,  8'd93,  8'd23,
+        8'd97,  8'd32,  8'd13,  8'd53,  8'd58,  8'd50,  8'd28,  8'd45,
+        8'd72,  8'd108, 8'd83,  8'd92,  8'd31,  8'd12,  8'd49,  8'd27,
+        8'd107, 8'd82,  8'd11,  8'd48,  8'd81,  8'd10,  8'd9,   8'd8
+    };
 
     // ---- architectural state ----
     logic [11:0] r_pc;
@@ -64,6 +116,10 @@ module ht943_core #(
     logic signed [15:0] r_timer_cnt;
     logic [3:0]  r_pa;
     logic [3:0]  r_pp_prev, r_pm_prev, r_ps_prev; // last-sampled pin state, for HALT-wake edge detect
+    logic        r_snd_on, r_snd_repeat;
+    logic [3:0]  r_snd_channel;
+    logic [5:0]  r_snd_note_ctr;
+    logic signed [23:0] r_snd_clk_cnt;
 
     // Read at many independently-computed addresses within the same
     // combinational block (Phase 2's opcode case). Quartus 17.0's RAM
@@ -93,6 +149,22 @@ module ht943_core #(
     assign opcode = r_halt ? 8'hFF : op;
     assign dbg_ram_data = ram[dbg_ram_addr];
 
+    assign snd_on      = r_snd_on;
+    assign snd_repeat  = r_snd_repeat;
+    assign snd_channel = r_snd_channel;
+    assign snd_note_ctr = r_snd_note_ctr;
+
+    // sROM offset formula from HT4BITsound._get_freq: channel*32, plus an
+    // extra (channel-12)*32 for channels beyond the 12 single-size ones.
+    logic [9:0] snd_chan_offset;
+    always_comb begin
+        snd_chan_offset = {6'd0, r_snd_channel} * 10'd32;
+        if (r_snd_channel > 4'd12)
+            snd_chan_offset = snd_chan_offset + (({6'd0, r_snd_channel} - 10'd12) * 10'd32);
+    end
+    assign snd_note = sound_rom[snd_chan_offset + {4'd0, r_snd_note_ctr}];
+    assign snd_fx = sound_fx[r_snd_channel][0];
+
     function automatic [7:0] ram_addr_of(input int rp);
         ram_addr_of = {r_wr[rp+1], r_wr[rp]};
     endfunction
@@ -107,6 +179,10 @@ module ht943_core #(
     logic [7:0]  n_tc;
     logic signed [15:0] n_timer_cnt;
     logic [3:0]  n_pa;
+    logic        n_snd_on, n_snd_repeat;
+    logic [3:0]  n_snd_channel;
+    logic [5:0]  n_snd_note_ctr;
+    logic signed [23:0] n_snd_clk_cnt;
     logic [3:0]  ram_wdata;
     logic        ram_we;
     logic [7:0]  ram_waddr;
@@ -133,6 +209,11 @@ module ht943_core #(
         n_tc      = r_tc;
         n_timer_cnt = r_timer_cnt;
         n_pa      = r_pa;
+        n_snd_on      = r_snd_on;
+        n_snd_repeat  = r_snd_repeat;
+        n_snd_channel = r_snd_channel;
+        n_snd_note_ctr = r_snd_note_ctr;
+        n_snd_clk_cnt = r_snd_clk_cnt;
         ram_we    = 1'b0;
         ram_waddr = 8'h0;
         ram_wdata = 4'h0;
@@ -221,7 +302,7 @@ module ht943_core #(
                     if (r_acc > 4'd9 || r_cf) begin n_acc = r_acc + 4'd6; n_cf = 1; end
                     n_pc = cur_pc + 1; ex_cycles = 4;
                 end
-                8'h37: begin n_pc = cur_pc + 2; n_halt = 1; n_ef = 0; ex_cycles = 8; end // HLT
+                8'h37: begin n_pc = cur_pc + 2; n_halt = 1; n_ef = 0; n_snd_on = 0; ex_cycles = 8; end // HLT
                 8'h38: begin n_timerf = 1; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'h39: begin n_timerf = 0; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'h3A: begin n_acc = r_tc[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
@@ -235,13 +316,19 @@ module ht943_core #(
                 8'h42: begin n_acc = r_acc & imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
                 8'h43: begin n_acc = r_acc ^ imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
                 8'h44: begin n_acc = r_acc | imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
-                8'h45: begin n_pc = cur_pc + 2; ex_cycles = 8; end // sound_n (audio not modeled)
+                8'h45: begin // sound_n
+                    n_snd_on = 1; n_snd_channel = imm[3:0]; n_snd_note_ctr = 6'd0;
+                    n_pc = cur_pc + 2; ex_cycles = 8;
+                end
                 8'h46: begin n_wr[4] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
                 8'h47: begin n_tc = imm; n_pc = cur_pc + 2; ex_cycles = 8; end
-                8'h48: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_one
-                8'h49: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_loop
-                8'h4A: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_off
-                8'h4B: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_a
+                8'h48: begin n_snd_repeat = 0; n_pc = cur_pc + 1; ex_cycles = 4; end // sound_one
+                8'h49: begin n_snd_repeat = 1; n_pc = cur_pc + 1; ex_cycles = 4; end // sound_loop
+                8'h4A: begin n_snd_on = 0; n_pc = cur_pc + 1; ex_cycles = 4; end // sound_off
+                8'h4B: begin // sound_a
+                    n_snd_on = 1; n_snd_channel = r_acc; n_snd_note_ctr = 6'd0;
+                    n_pc = cur_pc + 1; ex_cycles = 4;
+                end
                 8'h4C: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{npc1[11:8], r_acc, ram_rdata}]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
                 8'h4D: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{4'hF, r_acc, ram_rdata}]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
                 8'h4E: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{npc1[11:8], r_acc, r_wr[4]}]; n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
@@ -301,6 +388,29 @@ module ht943_core #(
                 n_tc = tcv;
                 n_tf = tfv;
             end
+
+            // sound engine tick — mirrors HT4BITsound.clock(exec_cycles),
+            // which HT4BIT.clock() calls right after the opcode executes,
+            // so a sound_n/sound_a on THIS instruction already sees its
+            // own new channel/on state here (hence using n_snd_* below,
+            // not r_snd_*).
+            if (n_snd_on) begin
+                logic signed [23:0] cnt;
+                logic [3:0] chan;
+                logic [6:0] chan_size;
+                logic [5:0] nc;
+                cnt = n_snd_clk_cnt - {{20{1'b0}}, ex_cycles};
+                if (cnt <= 0) begin
+                    chan = n_snd_channel;
+                    cnt = cnt + (24'(LFSR2DIV[speed_div[chan]]) * 24'(SOUND_FREQ_DIV) * 24'd16);
+                    chan_size = (chan >= 4'd12) ? 7'd64 : 7'd32;
+                    nc = n_snd_note_ctr + 6'd1;
+                    if ({1'b0, nc} >= chan_size) nc = 6'd0;
+                    n_snd_note_ctr = nc;
+                    if (nc == 6'd0 && !n_snd_repeat) n_snd_on = 0;
+                end
+                n_snd_clk_cnt = cnt;
+            end
         end else begin
             // Halted: mirrors HT943._pin_set's HALT-wake check, which fires
             // once on a masked pin's falling *transition* — not merely
@@ -333,6 +443,11 @@ module ht943_core #(
             r_pp_prev <= PP_PULLUP;
             r_pm_prev <= PM_PULLUP;
             r_ps_prev <= PS_PULLUP;
+            r_snd_on <= 1'b0;
+            r_snd_repeat <= 1'b0;
+            r_snd_channel <= 4'h0;
+            r_snd_note_ctr <= 6'h0;
+            r_snd_clk_cnt <= 24'sd0;
         end else begin
             r_pc <= n_pc;
             r_acc <= n_acc;
@@ -350,6 +465,11 @@ module ht943_core #(
             r_pp_prev <= pp_in;
             r_pm_prev <= pm_in;
             r_ps_prev <= ps_in;
+            r_snd_on <= n_snd_on;
+            r_snd_repeat <= n_snd_repeat;
+            r_snd_channel <= n_snd_channel;
+            r_snd_note_ctr <= n_snd_note_ctr;
+            r_snd_clk_cnt <= n_snd_clk_cnt;
             if (ram_we) ram[ram_waddr] <= ram_wdata;
         end
     end

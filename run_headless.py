@@ -92,6 +92,18 @@ def run(brick_path, n_instructions, presses=()):
             opcode = rom.get_byte(fetch_pc)
 
         s = cpu.examine()
+
+        # Sound engine state (Phase 6) — read the same internal fields
+        # HT4BITsound.py's clock()/_get_freq() use, at the same "before
+        # this instruction executes" instant as the rest of the trace.
+        snd = cpu._sound
+        channel = snd._channel
+        chanel_offset = channel * 32
+        if channel > 12:
+            chanel_offset += (channel - 12) * 32
+        note = snd._sROM[chanel_offset + snd._note_counter]
+        fx = snd._channel_effect[channel] & 0x1
+
         print(
             f"{i} "
             f"PC={fetch_pc & 0xFFF:03X} "
@@ -99,7 +111,9 @@ def run(brick_path, n_instructions, presses=()):
             f"A={s['ACC']:X} "
             f"R0={s['WR0']:X} R1={s['WR1']:X} R2={s['WR2']:X} R3={s['WR3']:X} R4={s['WR4']:X} "
             f"CF={s['CF']} TC={s['TC']:02X} "
-            f"EI={s['EI']} TF={s['TF']} EF={s['EF']} HALT={s['HALT']}"
+            f"EI={s['EI']} TF={s['TF']} EF={s['EF']} HALT={s['HALT']} "
+            f"SND={int(snd._sound_on)}{int(snd._repeat_cycle)} "
+            f"CH={channel:X} NC={snd._note_counter:02X} NOTE={note:02X} FX={fx}"
         )
 
         cycles = cpu.clock()

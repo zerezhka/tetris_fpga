@@ -89,7 +89,8 @@ int main(int argc, char** argv) {
         top->eval();
         std::printf(
             "%ld PC=%03X OP=%02X A=%X R0=%X R1=%X R2=%X R3=%X R4=%X "
-            "CF=%d TC=%02X EI=%d TF=%d EF=%d HALT=%d\n",
+            "CF=%d TC=%02X EI=%d TF=%d EF=%d HALT=%d "
+            "SND=%d%d CH=%X NC=%02X NOTE=%02X FX=%d\n",
             i,
             top->pc & 0xFFF,
             top->opcode & 0xFF,
@@ -98,7 +99,10 @@ int main(int argc, char** argv) {
             top->wr3 & 0xF, top->wr4 & 0xF,
             top->cf & 1,
             top->tc & 0xFF,
-            top->ei & 1, top->tf & 1, top->ef & 1, top->halt & 1
+            top->ei & 1, top->tf & 1, top->ef & 1, top->halt & 1,
+            top->snd_on & 1, top->snd_repeat & 1,
+            top->snd_channel & 0xF, top->snd_note_ctr & 0x3F,
+            top->snd_note & 0xFF, top->snd_fx & 1
         );
 
         top->clk = 0;

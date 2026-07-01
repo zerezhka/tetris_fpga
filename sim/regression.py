@@ -60,11 +60,16 @@ def run_reference(brick_path, n, presses, env=None):
     return subprocess.run(args, capture_output=True, text=True, check=True, env=full_env).stdout
 
 
-def run_rtl(rom_bin, timer_div, n, port_pullup, port_wakeup, port_events, env=None):
+def run_rtl(rom_bin, timer_div, n, port_pullup, port_wakeup, port_events, env=None,
+            sound_rom_path=None, sound_freq_div=64, sound_speed_div=None, sound_effect=None):
     args = [
         os.path.join(ROOT, 'sim', 'build_and_run.sh'), rom_bin, str(timer_div), str(n),
         str(port_pullup['PP']), str(port_pullup['PM']), str(port_pullup['PS']),
         str(port_wakeup.get('PP', 0)), str(port_wakeup.get('PM', 0)), str(port_wakeup.get('PS', 0)),
+        sound_rom_path if sound_rom_path else '-',
+        str(sound_freq_div),
+        ','.join(str(v) for v in (sound_speed_div or [0] * 16)),
+        ','.join(str(v) for v in (sound_effect or [0] * 16)),
     ]
     args += [f"{port}:{instr}:{value}" for instr, port, value in port_events]
     full_env = {**os.environ, **env} if env else None
@@ -98,7 +103,9 @@ def real_rom_case(name, n=200000, presses=()):
     port_wakeup = mask['port_wakeup']
     initial, events = compute_port_events(port_pullup, direct_input, presses)
     ref = run_reference(brick_path, n, presses)
-    rtl = run_rtl(mask['rom_path'], mask['timer_clock_div'], n, initial, port_wakeup, events)
+    rtl = run_rtl(mask['rom_path'], mask['timer_clock_div'], n, initial, port_wakeup, events,
+                  sound_rom_path=mask.get('sound_rom_path'), sound_freq_div=mask['sound_freq_div'],
+                  sound_speed_div=mask['sound_speed_div'], sound_effect=mask['sound_effect'])
     return diff(ref, rtl)
 
 
@@ -120,7 +127,9 @@ def fixture_case(name, n, presses=()):
     port_wakeup = mask['port_wakeup']
     initial, events = compute_port_events(port_pullup, direct_input, presses)
     ref = run_reference(brick_path, n, presses)
-    rtl = run_rtl(mask['rom_path'], mask['timer_clock_div'], n, initial, port_wakeup, events)
+    rtl = run_rtl(mask['rom_path'], mask['timer_clock_div'], n, initial, port_wakeup, events,
+                  sound_rom_path=mask.get('sound_rom_path'), sound_freq_div=mask['sound_freq_div'],
+                  sound_speed_div=mask['sound_speed_div'], sound_effect=mask['sound_effect'])
     return diff(ref, rtl)
 
 

@@ -262,7 +262,7 @@ same one both renderers would draw from. Folded into
 `sim/regression.py` for all 6 real ROMs — all PASS (128-320 segments
 each, 200k instructions).
 
-### Phase 6: Audio (Week 7)
+### Phase 6: Audio (Week 7) — DONE
 
 ```
 Sound ROM (.srom, 640B) ──→ LFSR frequency table ──→ Square wave ──→ 1-bit out
@@ -270,7 +270,28 @@ Sound ROM (.srom, 640B) ──→ LFSR frequency table ──→ Square wave ─
 
 **Reference:** HT4BITsound.py [^42^] — 128-entry LFSR2DIV table, 12 channels, squareness factor 5.
 
-**Test:** Record WAV from BrickEmuPy and WAV from FPGA. Spectral correlation check.
+Revised the test approach the same way Phase 5's was: BrickEmuPy's actual
+"WAV" isn't a hardware-accurate square wave — `audio_engine.py` takes the
+selected note's frequency and synthesizes a smoothed sine/noise-blend tone
+for pleasant PC-speaker playback (sine + random-flip "squareness" shaping).
+That shaping is emulator-side embellishment, not chip behavior, and has no
+bit-exact ground truth to compare an RTL square-wave generator against.
+
+What *is* hardware-relevant and bit-exact is `HT4BITsound.clock()`'s state
+machine: which sROM byte is currently selected per channel/note step. The
+RTL sound engine (`rtl/ht943_core.sv`) reproduces this directly — same
+channel/note_counter/clock_counter transitions, same LFSR2DIV table, same
+sROM offset formula (`channel*32`, `+(channel-12)*32` for channels beyond
+the 12 single-size ones) — and exposes it as new trace fields
+(`SND=<on><repeat> CH=<channel> NC=<note_counter> NOTE=<sROM byte>
+FX=<effect bit>`).
+
+**Test:** folded straight into the existing per-instruction trace compare
+— no new harness needed, since `diff_trace.py` already does a raw line
+diff. This caught a real RTL bug immediately: `HT4BIT._halt` also calls
+`sound.set_sound_off()`, which the RTL's `HLT` opcode wasn't doing. Fixed;
+all 6 real ROMs match bit-exact over 200k instructions including sound
+engine state (`sim/regression.py`).
 
 ### Phase 7: Full ROM Verification (Week 8-10)
 

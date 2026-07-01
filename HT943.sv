@@ -110,8 +110,8 @@ pll pll
 wire reset = RESET | status[0] | buttons[1];
 
 // Smoke-test instantiation only: proves the core fits/routes on real
-// hardware. No ROM loading via OSD, no LCD/audio output yet (Phase 4-6
-// of the roadmap) — trace outputs are unconnected until then.
+// hardware. No ROM loading via OSD, no LCD/audio output wiring yet —
+// trace outputs are unconnected until then.
 wire [11:0] cpu_pc;
 wire [7:0]  cpu_opcode;
 wire [3:0]  cpu_acc;
@@ -137,8 +137,11 @@ ht943_core ht943_core
 	.tc(cpu_tc),
 	.ei(cpu_ei), .tf(cpu_tf), .ef(cpu_ef), .halt(cpu_halt),
 
-	// LCD renderer not wired up yet (Phase 5 in progress) — tie off.
-	.dbg_ram_addr(8'h0), .dbg_ram_data()
+	// LCD renderer not wired up yet — tie off.
+	.dbg_ram_addr(8'h0), .dbg_ram_data(),
+
+	// Audio output not wired up yet (Phase 6 in progress) — tie off.
+	.snd_on(), .snd_repeat(), .snd_channel(), .snd_note_ctr(), .snd_note(), .snd_fx()
 );
 
 reg  [26:0] act_cnt;
