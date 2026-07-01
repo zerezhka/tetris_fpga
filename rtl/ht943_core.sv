@@ -9,18 +9,28 @@
 // to just the RHS — there is no page nibble to preserve. If a >4KB ROM
 // variant is ever targeted, PC must widen and those masks reinstated.
 //
-// PM/PS/PP input ports are tied to a fixed pullup value (no button-press
-// modeling yet) — sufficient to match a headless run with no input events.
+// PM/PS/PP are continuously-sampled external pins (pp_in/pm_in/ps_in), not
+// internal registers: IN A,Pn reads them directly with zero lag, matching
+// BrickEmuPy's HT943._PP/_PM/_PS being mutated synchronously by the GUI/
+// interconnect before the clock() call that reads them. A one-cycle-delayed
+// copy of each is kept only to edge-detect a HALT-wake (see the `else`
+// branch below), mirroring _pin_set's HALT-wake check firing on a level
+// *transition*, not on the level simply reading low.
 
 module ht943_core #(
     parameter ROM_HEX_FILE = "",
     parameter int    TIMER_DIV    = 16,
     parameter logic [3:0] PP_PULLUP = 4'hF,
     parameter logic [3:0] PM_PULLUP = 4'hF,
-    parameter logic [3:0] PS_PULLUP = 4'hF
+    parameter logic [3:0] PS_PULLUP = 4'hF,
+    parameter logic [3:0] PP_WAKEUP = 4'h0,
+    parameter logic [3:0] PM_WAKEUP = 4'h0,
+    parameter logic [3:0] PS_WAKEUP = 4'h0
 ) (
     input  logic        clk,
     input  logic         rst,
+
+    input  logic [3:0]  pp_in, pm_in, ps_in,
 
     // trace outputs — reflect state BEFORE executing the instruction at `pc`
     output logic [11:0] pc,
@@ -47,7 +57,7 @@ module ht943_core #(
     logic [7:0]  r_tc;
     logic signed [15:0] r_timer_cnt;
     logic [3:0]  r_pa;
-    logic [3:0]  r_pp, r_pm, r_ps;
+    logic [3:0]  r_pp_prev, r_pm_prev, r_ps_prev; // last-sampled pin state, for HALT-wake edge detect
 
     // Read at many independently-computed addresses within the same
     // combinational block (Phase 2's opcode case). Quartus 17.0's RAM
@@ -196,9 +206,9 @@ module ht943_core #(
                 8'h2F: begin n_pc = r_stack[11:0]; n_cf = r_stack[12]; n_stack = 13'd0; ex_cycles = 4; end
                 8'h30: begin n_pa = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end // OUT PA,A
                 8'h31: begin n_acc = r_acc + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h32: begin n_acc = r_pm; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PM
-                8'h33: begin n_acc = r_ps; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PS
-                8'h34: begin n_acc = r_pp; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PP
+                8'h32: begin n_acc = pm_in; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PM
+                8'h33: begin n_acc = ps_in; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PS
+                8'h34: begin n_acc = pp_in; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PP
                 8'h35: begin n_pc = cur_pc + 1; ex_cycles = 4; end // dummy
                 8'h36: begin // DAA
                     if (r_acc > 4'd9 || r_cf) begin n_acc = r_acc + 4'd6; n_cf = 1; end
@@ -284,6 +294,17 @@ module ht943_core #(
                 n_tc = tcv;
                 n_tf = tfv;
             end
+        end else begin
+            // Halted: mirrors HT943._pin_set's HALT-wake check, which fires
+            // once on a masked pin's falling *transition* — not merely
+            // reading low — so a button already held before HLT executed
+            // does not wake the CPU (matches the reference exactly).
+            if (((PP_WAKEUP & r_pp_prev & ~pp_in) != 4'h0) ||
+                ((PM_WAKEUP & r_pm_prev & ~pm_in) != 4'h0) ||
+                ((PS_WAKEUP & r_ps_prev & ~ps_in) != 4'h0)) begin
+                n_ef   = 1'b1;
+                n_halt = 1'b0;
+            end
         end
     end
 
@@ -302,9 +323,9 @@ module ht943_core #(
             r_tc <= 8'h0;
             r_timer_cnt <= 16'sd0;
             r_pa <= 4'h0;
-            r_pp <= PP_PULLUP;
-            r_pm <= PM_PULLUP;
-            r_ps <= PS_PULLUP;
+            r_pp_prev <= PP_PULLUP;
+            r_pm_prev <= PM_PULLUP;
+            r_ps_prev <= PS_PULLUP;
         end else begin
             r_pc <= n_pc;
             r_acc <= n_acc;
@@ -319,6 +340,9 @@ module ht943_core #(
             r_tc <= n_tc;
             r_timer_cnt <= n_timer_cnt;
             r_pa <= n_pa;
+            r_pp_prev <= pp_in;
+            r_pm_prev <= pm_in;
+            r_ps_prev <= ps_in;
             if (ram_we) ram[ram_waddr] <= ram_wdata;
         end
     end

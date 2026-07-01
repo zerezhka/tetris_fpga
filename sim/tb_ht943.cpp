@@ -2,20 +2,61 @@
 // Emits a per-instruction trace in the exact format produced by
 // run_headless.py, so diff_trace.py can compare the two directly.
 //
-// Usage: tb_ht943 <num_instructions>
-// (ROM_HEX_FILE / TIMER_DIV are baked in at elaboration time via -G params
-// passed on the verilator command line by the build script.)
+// Usage: tb_ht943 <num_instructions> [pp_pullup pm_pullup ps_pullup
+//                  [port:instr:value ...]]
+// (ROM_HEX_FILE / TIMER_DIV / *_WAKEUP are baked in at elaboration time via
+// -G params passed on the verilator command line by the build script.)
+//
+// port:instr:value schedules a pin-level change: at instruction `instr`,
+// drive the named port (PP/PM/PS) to `value` (0-15). Mirrors
+// run_headless.py's button:press_at:release_at at the pin level.
 
 #include "Vht943_core.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
+
+struct PinEvent {
+    long instr;
+    int port; // 0=PP, 1=PM, 2=PS
+    int value;
+};
+
+static int port_index(const char* name) {
+    if (!std::strcmp(name, "PP")) return 0;
+    if (!std::strcmp(name, "PM")) return 1;
+    if (!std::strcmp(name, "PS")) return 2;
+    std::fprintf(stderr, "unknown port %s (want PP/PM/PS)\n", name);
+    std::exit(2);
+}
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vht943_core* top = new Vht943_core;
 
     long n = (argc > 1) ? atol(argv[1]) : 10000;
+    int pp_idle = (argc > 2) ? atoi(argv[2]) : 15;
+    int pm_idle = (argc > 3) ? atoi(argv[3]) : 15;
+    int ps_idle = (argc > 4) ? atoi(argv[4]) : 15;
+
+    std::vector<PinEvent> events;
+    for (int i = 5; i < argc; i++) {
+        char port[3] = {0};
+        long instr;
+        int value;
+        if (std::sscanf(argv[i], "%2[^:]:%ld:%d", port, &instr, &value) != 3) {
+            std::fprintf(stderr, "bad event %s (want PORT:instr:value)\n", argv[i]);
+            return 2;
+        }
+        events.push_back({instr, port_index(port), value});
+    }
+
+    int pp = pp_idle, pm = pm_idle, ps = ps_idle;
+    top->pp_in = pp;
+    top->pm_in = pm;
+    top->ps_in = ps;
 
     // reset
     top->rst = 1;
@@ -26,6 +67,24 @@ int main(int argc, char** argv) {
     top->rst = 0;
 
     for (long i = 0; i < n; i++) {
+        // Applied one cycle early (instr-1): run_headless.py mutates its
+        // port register with a plain synchronous call *before* printing
+        // instruction `instr`, so that trace line already reflects the
+        // new pin state. Here the same effect needs a clock edge to reach
+        // r_ef/r_halt, so the pin has to change one cycle ahead for the
+        // printed line at `instr` to match.
+        for (const auto& e : events) {
+            if (e.instr != i + 1) continue;
+            switch (e.port) {
+                case 0: pp = e.value; break;
+                case 1: pm = e.value; break;
+                case 2: ps = e.value; break;
+            }
+        }
+        top->pp_in = pp;
+        top->pm_in = pm;
+        top->ps_in = ps;
+
         // combinational outputs already reflect pre-instruction state
         top->eval();
         std::printf(

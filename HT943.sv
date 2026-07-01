@@ -125,6 +125,10 @@ ht943_core ht943_core
 	.clk(clk_sys),
 	.rst(reset),
 
+	// No button wiring yet (ROM loading / OSD input mapping is later
+	// roadmap work) — idle pins read as pulled-up, matching reset.
+	.pp_in(4'hF), .pm_in(4'hF), .ps_in(4'hF),
+
 	.pc(cpu_pc),
 	.opcode(cpu_opcode),
 	.acc(cpu_acc),
