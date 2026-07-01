@@ -1,0 +1,303 @@
+// HT943 4-bit MCU core — instruction-level (non cycle-accurate) model.
+//
+// One instruction retires per clock edge, mirroring BrickEmuPy's HT4BIT.clock()
+// software model: correctness first, cycle accuracy comes later (see roadmap).
+//
+// ROM is 4096 bytes (fixed for Phase 0 test ROMs), loaded via $readmemh.
+// Since PC is modeled as exactly 12 bits here (matches the 4KB test ROMs),
+// every "(PC & 0xF000) | ..." mask from the reference software model reduces
+// to just the RHS — there is no page nibble to preserve. If a >4KB ROM
+// variant is ever targeted, PC must widen and those masks reinstated.
+//
+// PM/PS/PP input ports are tied to a fixed pullup value (no button-press
+// modeling yet) — sufficient to match a headless run with no input events.
+
+module ht943_core #(
+    parameter string ROM_HEX_FILE = "",
+    parameter int    TIMER_DIV    = 16,
+    parameter logic [3:0] PP_PULLUP = 4'hF,
+    parameter logic [3:0] PM_PULLUP = 4'hF,
+    parameter logic [3:0] PS_PULLUP = 4'hF
+) (
+    input  logic        clk,
+    input  logic         rst,
+
+    // trace outputs — reflect state BEFORE executing the instruction at `pc`
+    output logic [11:0] pc,
+    output logic [7:0]  opcode,
+    output logic [3:0]  acc,
+    output logic [3:0]  wr0, wr1, wr2, wr3, wr4,
+    output logic        cf,
+    output logic [7:0]  tc,
+    output logic        ei, tf, ef, halt
+);
+
+    logic [7:0] rom [0:4095];
+    initial begin
+        if (ROM_HEX_FILE != "")
+            $readmemh(ROM_HEX_FILE, rom);
+    end
+
+    // ---- architectural state ----
+    logic [11:0] r_pc;
+    logic [3:0]  r_acc;
+    logic [3:0]  r_wr [0:4];
+    logic [12:0] r_stack;      // {carry, pc[11:0]} ; 0 == empty (1-level stack)
+    logic        r_ei, r_cf, r_tf, r_ef, r_halt, r_timerf;
+    logic [7:0]  r_tc;
+    logic signed [15:0] r_timer_cnt;
+    logic [3:0]  r_pa;
+    logic [3:0]  r_pp, r_pm, r_ps;
+
+    logic [3:0] ram [0:255];
+
+    assign pc   = r_pc;
+    assign acc  = r_acc;
+    assign wr0  = r_wr[0];
+    assign wr1  = r_wr[1];
+    assign wr2  = r_wr[2];
+    assign wr3  = r_wr[3];
+    assign wr4  = r_wr[4];
+    assign cf   = r_cf;
+    assign tc   = r_tc;
+    assign ei   = r_ei;
+    assign tf   = r_tf;
+    assign ef   = r_ef;
+    assign halt = r_halt;
+    assign opcode = r_halt ? 8'hFF : rom[r_pc];
+
+    function automatic [7:0] rd_rom(input logic [11:0] a);
+        rd_rom = rom[a]; // ROM size is a power of two (4096) -> index wraps naturally
+    endfunction
+
+    function automatic [7:0] ram_addr_of(input int rp);
+        ram_addr_of = {r_wr[rp+1], r_wr[rp]};
+    endfunction
+
+    // ---- next-state combinational logic ----
+    logic [11:0] n_pc;
+    logic [3:0]  n_acc;
+    logic [3:0]  n_wr [0:4];
+    logic [12:0] n_stack;
+    logic        n_ei, n_cf, n_tf, n_ef, n_halt, n_timerf;
+    logic [7:0]  n_tc;
+    logic signed [15:0] n_timer_cnt;
+    logic [3:0]  n_pa;
+    logic [3:0]  ram_wdata;
+    logic        ram_we;
+    logic [7:0]  ram_waddr;
+
+    logic [11:0] cur_pc;   // pc possibly redirected by interrupt, before fetch
+    logic [7:0]  op;
+    logic [7:0]  imm;      // byte at cur_pc+1
+    logic [3:0]  ex_cycles;
+
+    always_comb begin
+        // defaults: hold state
+        n_pc      = r_pc;
+        n_acc     = r_acc;
+        for (int i = 0; i < 5; i++) n_wr[i] = r_wr[i];
+        n_stack   = r_stack;
+        n_ei      = r_ei;
+        n_cf      = r_cf;
+        n_tf      = r_tf;
+        n_ef      = r_ef;
+        n_halt    = r_halt;
+        n_timerf  = r_timerf;
+        n_tc      = r_tc;
+        n_timer_cnt = r_timer_cnt;
+        n_pa      = r_pa;
+        ram_we    = 1'b0;
+        ram_waddr = 8'h0;
+        ram_wdata = 4'h0;
+        ex_cycles = 4'd4;
+        cur_pc    = r_pc;
+        op        = 8'h00;
+        imm       = 8'h00;
+
+        if (!r_halt) begin
+            // interrupt check (only when the 1-level stack is free)
+            if (r_ei && r_stack == 13'd0) begin
+                if (r_ef) begin
+                    n_ef    = 1'b0;
+                    n_stack = {r_cf, cur_pc};
+                    cur_pc  = 12'h008; // EXTERNAL_INT_LOCATION
+                end else if (r_tf) begin
+                    n_tf    = 1'b0;
+                    n_stack = {r_cf, cur_pc};
+                    cur_pc  = 12'h004; // TIMER_INT_LOCATION
+                end
+            end
+
+            op  = rd_rom(cur_pc);
+            imm = rd_rom(cur_pc + 12'd1);
+
+            unique casez (op)
+                8'h00: begin n_cf = r_acc[0]; n_acc = {n_cf, r_acc[3:1]}; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h01: begin n_cf = r_acc[3]; n_acc = {r_acc[2:0], n_cf}; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h02: begin logic new_cf; new_cf = r_acc[0]; n_acc = {r_cf, r_acc[3:1]}; n_cf = new_cf; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h03: begin logic new_cf; new_cf = r_acc[3]; n_acc = {r_acc[2:0], r_cf}; n_cf = new_cf; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h04: begin n_acc = ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h05: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h06: begin n_acc = ram[ram_addr_of(2)]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h07: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h08: begin logic [4:0] s; s = ram[ram_addr_of(0)] + r_acc + r_cf; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h09: begin logic [4:0] s; s = ram[ram_addr_of(0)] + r_acc; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0A: begin logic [4:0] s; s = (~ram[ram_addr_of(0)] & 4'hF) + r_acc + r_cf; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0B: begin logic [4:0] s; s = (~ram[ram_addr_of(0)] & 4'hF) + r_acc + 5'd1; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0C: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0D: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0E: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = ram[ram_addr_of(2)] + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0F: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = ram[ram_addr_of(2)] - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'b0001_0??0, 8'b0001_1000: begin // inc_rn: 0x10,12,14,16,18 -> WRi=(op>>1)&7
+                    int wi; wi = op[3:1];
+                    n_wr[wi] = r_wr[wi] + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4;
+                end
+                8'b0001_0??1, 8'b0001_1001: begin // dec_rn: 0x11,13,15,17,19
+                    int wi; wi = op[3:1];
+                    n_wr[wi] = r_wr[wi] - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4;
+                end
+                8'h1A: begin n_acc = r_acc & ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1B: begin n_acc = r_acc ^ ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1C: begin n_acc = r_acc | ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1D: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] & r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1E: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] ^ r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1F: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] | r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'b0010_0??0, 8'b0010_1000: begin int wi; wi = op[3:1]; n_wr[wi] = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end // mov_rn_a (0x20,22,24,26,28)
+                8'b0010_0??1, 8'b0010_1001: begin int wi; wi = op[3:1]; n_acc = r_wr[wi]; n_pc = cur_pc + 1; ex_cycles = 4; end // mov_a_rn (0x21,23,25,27,29)
+                8'h2A: begin n_cf = 0; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h2B: begin n_cf = 1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h2C: begin n_ei = 1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h2D: begin n_ei = 0; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h2E: begin n_pc = r_stack[11:0]; n_stack = 13'd0; ex_cycles = 4; end
+                8'h2F: begin n_pc = r_stack[11:0]; n_cf = r_stack[12]; n_stack = 13'd0; ex_cycles = 4; end
+                8'h30: begin n_pa = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end // OUT PA,A
+                8'h31: begin n_acc = r_acc + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h32: begin n_acc = r_pm; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PM
+                8'h33: begin n_acc = r_ps; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PS
+                8'h34: begin n_acc = r_pp; n_pc = cur_pc + 1; ex_cycles = 4; end // IN A,PP
+                8'h35: begin n_pc = cur_pc + 1; ex_cycles = 4; end // dummy
+                8'h36: begin // DAA
+                    if (r_acc > 4'd9 || r_cf) begin n_acc = r_acc + 4'd6; n_cf = 1; end
+                    n_pc = cur_pc + 1; ex_cycles = 4;
+                end
+                8'h37: begin n_pc = cur_pc + 2; n_halt = 1; n_ef = 0; ex_cycles = 8; end // HLT
+                8'h38: begin n_timerf = 1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h39: begin n_timerf = 0; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h3A: begin n_acc = r_tc[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h3B: begin n_acc = r_tc[7:4]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h3C: begin n_tc = {r_tc[7:4], r_acc}; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h3D: begin n_tc = {r_acc, r_tc[3:0]}; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h3E: begin n_pc = cur_pc + 1; ex_cycles = 4; end // NOP
+                8'h3F: begin n_acc = r_acc - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h40: begin logic [4:0] s; s = r_acc + imm[3:0]; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
+                8'h41: begin logic [4:0] s; s = r_acc + (~imm[3:0] & 4'hF) + 5'd1; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
+                8'h42: begin n_acc = r_acc & imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
+                8'h43: begin n_acc = r_acc ^ imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
+                8'h44: begin n_acc = r_acc | imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
+                8'h45: begin n_pc = cur_pc + 2; ex_cycles = 8; end // sound_n (audio not modeled)
+                8'h46: begin n_wr[4] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end
+                8'h47: begin n_tc = imm; n_pc = cur_pc + 2; ex_cycles = 8; end
+                8'h48: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_one
+                8'h49: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_loop
+                8'h4A: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_off
+                8'h4B: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_a
+                8'h4C: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({npc1[11:8], r_acc, ram[ram_addr_of(0)]}); n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
+                8'h4D: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({4'hF, r_acc, ram[ram_addr_of(0)]}); n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
+                8'h4E: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({npc1[11:8], r_acc, r_wr[4]}); n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
+                8'h4F: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({4'hF, r_acc, r_wr[4]}); n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
+                8'b0101_????: begin n_wr[0] = op[3:0]; n_wr[1] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end // 0x50-5F MOV R1R0,xx
+                8'b0110_????: begin n_wr[2] = op[3:0]; n_wr[3] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end // 0x60-6F MOV R3R2,xx
+                8'b0111_????: begin n_acc = op[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end // 0x70-7F MOV A,x
+                8'b100?_????: begin // 0x80-9F JAN a,address (32 entries)
+                    logic [11:0] target;
+                    target = {cur_pc[11], op[2:0], imm};
+                    n_pc = cur_pc + 2;
+                    if (r_acc[op[4:3]]) n_pc = target;
+                    ex_cycles = 8;
+                end
+                default: begin // 0xA0-0xFF: branch/call range, decoded below
+                    n_pc = cur_pc + 1; ex_cycles = 4;
+                end
+            endcase
+
+            // --- second-stage decode for branch/call ranges 0xA0-0xFF ---
+            if (op[7:5] == 3'b101 || op[7:5] == 3'b110 || op[7:4] == 4'hD || op[7:4] == 4'hE || op[7:4] == 4'hF) begin
+                logic [11:0] target;
+                target = {cur_pc[11], op[2:0], imm};
+                unique casez (op)
+                    8'b1010_0???: begin n_pc = cur_pc + 2; if (r_wr[0] != 0) n_pc = target; ex_cycles = 8; end // JNZ R0
+                    8'b1010_1???: begin n_pc = cur_pc + 2; if (r_wr[1] != 0) n_pc = target; ex_cycles = 8; end // JNZ R1
+                    8'b1011_0???: begin n_pc = cur_pc + 2; if (r_acc == 0) n_pc = target; ex_cycles = 8; end  // JZ A
+                    8'b1011_1???: begin n_pc = cur_pc + 2; if (r_acc != 0) n_pc = target; ex_cycles = 8; end  // JNZ A
+                    8'b1100_0???: begin n_pc = cur_pc + 2; if (r_cf) n_pc = target; ex_cycles = 8; end        // JC
+                    8'b1100_1???: begin n_pc = cur_pc + 2; if (!r_cf) n_pc = target; ex_cycles = 8; end       // JNC
+                    8'b1101_0???: begin n_pc = cur_pc + 2; if (r_tf) begin n_pc = target; n_tf = 0; end ex_cycles = 8; end // JTMR
+                    8'b1101_1???: begin n_pc = cur_pc + 2; if (r_wr[4] != 0) n_pc = target; ex_cycles = 8; end // JNZ R4
+                    8'b1110_????: begin n_pc = {op[3:0], imm}; ex_cycles = 8; end // JMP
+                    8'b1111_????: begin n_stack = {r_cf, cur_pc + 12'd2}; n_pc = {op[3:0], imm}; ex_cycles = 8; end // CALL
+                    default: ;
+                endcase
+            end
+
+            // timer update (only advances while CPU is running)
+            begin
+                logic signed [15:0] cnt;
+                logic [7:0] tcv;
+                logic tfv;
+                cnt = r_timer_cnt - ex_cycles;
+                tcv = n_tc;
+                tfv = n_tf;
+                for (int iter = 0; iter < 64; iter++) begin
+                    if (cnt <= 0) begin
+                        cnt = cnt + TIMER_DIV;
+                        if (n_timerf) begin
+                            tcv = tcv + 8'd1;
+                            if (tcv == 8'd0) tfv = 1'b1;
+                        end
+                    end
+                end
+                n_timer_cnt = cnt;
+                n_tc = tcv;
+                n_tf = tfv;
+            end
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            r_pc <= 12'h0;
+            r_acc <= 4'h0;
+            for (int i = 0; i < 5; i++) r_wr[i] <= 4'h0;
+            r_stack <= 13'h0;
+            r_ei <= 1'b0;
+            r_cf <= 1'b0;
+            r_tf <= 1'b0;
+            r_ef <= 1'b0;
+            r_halt <= 1'b0;
+            r_timerf <= 1'b0;
+            r_tc <= 8'h0;
+            r_timer_cnt <= 16'sd0;
+            r_pa <= 4'h0;
+            r_pp <= PP_PULLUP;
+            r_pm <= PM_PULLUP;
+            r_ps <= PS_PULLUP;
+        end else begin
+            r_pc <= n_pc;
+            r_acc <= n_acc;
+            for (int i = 0; i < 5; i++) r_wr[i] <= n_wr[i];
+            r_stack <= n_stack;
+            r_ei <= n_ei;
+            r_cf <= n_cf;
+            r_tf <= n_tf;
+            r_ef <= n_ef;
+            r_halt <= n_halt;
+            r_timerf <= n_timerf;
+            r_tc <= n_tc;
+            r_timer_cnt <= n_timer_cnt;
+            r_pa <= n_pa;
+            if (ram_we) ram[ram_waddr] <= ram_wdata;
+        end
+    end
+
+endmodule

@@ -149,41 +149,56 @@ diff(reference.trace, fpga.trace) ──→ PASS / FAIL
 
 **ROM for Phase 0:** `E88_8in1.bin` — 1 MHz, timer_div=16, no sound ROM. MameGalaxian.bin is not available in BrickEmuPy (MAME-internal only).
 
-### Phase 1: Fetch + Decode (Week 2)
+### Phase 1: Fetch + Decode (Week 2) — ✅ DONE
 
-Implement PC + instruction decode table.
+Implemented as `rtl/ht943_core.sv`: 12-bit PC, full 256-entry opcode decode
+(HT4BIT.py + HT943.py overrides), ROM fetch via `$readmemh` from a
+`tools/bin2hex.py`-converted `.bin`.
 
 | Task | Reference | Check |
 |------|-----------|-------|
-| 12-bit PC with increment | `ht1130.h` [^30^] | PC advances correctly |
-| 256-entry decode table | HT4BIT.py:61-80 [^23^] | Each opcode → correct handler name |
-| ROM fetch | `ROM` class in BrickEmuPy | Bytes match `.bin` file |
+| 12-bit PC with increment | `ht1130.h` [^30^] | PC advances correctly ✅ |
+| 256-entry decode table | HT4BIT.py:61-80 [^23^] | Each opcode → correct handler ✅ |
+| ROM fetch | `ROM` class in BrickEmuPy | Bytes match `.bin` file ✅ |
 
-**Test:** Run ROM, compare `PC, opcode_byte, decoded_name` sequence with BrickEmuPy trace. 100% match = done.
+**Test:** Verified via combined Phase 1+2 trace comparison below.
 
-### Phase 2: Execute (Week 3)
+### Phase 2: Execute (Week 3) — ✅ DONE
 
-Implement all instructions. Order of implementation:
+All instructions implemented in `rtl/ht943_core.sv` (single module — decode
+and execute are combined per-opcode, rather than the sequenced order
+originally sketched below). Sound-channel instructions (`sound_n`,
+`sound_one`, `sound_loop`, `sound_off`, `sound_a`) advance PC/cycles only —
+actual audio synthesis is deferred to Phase 6.
 
-```
-1. NOP, HLT                    → control flow
-2. RR, RL, RRC, RLC            → rotates (ACC only)
-3. INC Rn, DEC Rn              → register ops
-4. MOV A,@R1R0 / MOV @R1R0,A  → memory access
-5. ADD, ADC, SUB, SBC          → ALU with carry
-6. AND, OR, XOR                → logic ops
-7. IN A,PM/PS/PP / OUT PA,A    → I/O ports
-8. JMP, CALL, RET, conditional → branches
-9. EI, DI, STT, SPT            → interrupt + timer control
-```
+Model is **instruction-level, not cycle-accurate**: one instruction retires
+per clock edge (mirrors BrickEmuPy's `HT4BIT.clock()` exactly). Cycle-accurate
+timing (4 vs 8 clocks per instruction) is tracked only for the timer
+prescaler, not for real bus/clock behavior — that refinement is future work
+once correctness is fully nailed down.
 
-**Per-instruction workflow:**
-1. Write test ASM program (HT-IDE3000 or hand-assembled)
-2. Run in BrickEmuPy → capture reference trace
-3. Run on FPGA → capture your trace
-4. `diff_trace.py` → fix → repeat
+**Verification pipeline:**
+- `tools/bin2hex.py` — converts `.bin` ROM → `$readmemh` hex
+- `sim/tb_ht943.cpp` — Verilator testbench, emits trace in `run_headless.py` format
+- `sim/build_and_run.sh <rom.bin> <timer_div> <n> [pp] [pm] [ps]` — build + run, race-safe (unique per-invocation build dir/hex via PID tag)
+- `diff_trace.py` — now normalizes Python `True`/`False` CF artifacts to `1`/`0` before comparing
 
-**Test:** `E88_8in1.bin` runs without illegal instructions. Trace matches BrickEmuPy.
+**Test results (100% PC/opcode/register/flag match, zero divergence):**
+
+| ROM | Instructions traced | Timer div | Result |
+|-----|---------------------|-----------|--------|
+| E88_8in1 | 2,000,000 | 16 | ✅ MATCH |
+| E23PlusMarkII96in1 | 500,000 | 16 | ✅ MATCH |
+| GA888 | 500,000 | 16 | ✅ MATCH |
+| Keychain55in1 | 500,000 | 8 | ✅ MATCH |
+| KeychainPinBall | 500,000 | 16 | ✅ MATCH |
+| SpaceIntruderTK150I | 500,000 | 16 | ✅ MATCH |
+
+Not yet exercised: `HLT` + wakeup path (no HALT observed in these traces —
+none of these ROMs idle within the traced window with no button input), and
+PM/PS/PP button-press transitions (ports are currently tied to a fixed
+pullup value in the SV testbench, matching a headless run with no input
+events). Both are Phase 3/4 concerns.
 
 ### Phase 3: Timer + Interrupts (Week 4)
 
