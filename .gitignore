@@ -13,3 +13,12 @@ cr_ie_info.json
 qmegawiz_errors_log.txt
 .cnxerr
 *.qws
+
+# Verilator interactive-session build artifacts (sim/build_interactive.sh
+# leaves these for the lifetime of a play_rtl.py session instead of
+# self-deleting like build_and_run.sh does)
+sim/obj_dir_interactive_*/
+sim/rom_*.hex
+sim/sound_*.hex
+sim/speed_*.hex
+sim/effect_*.hex
