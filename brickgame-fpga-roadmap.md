@@ -230,20 +230,37 @@ events). Both are Phase 3/4 concerns.
 
 **Test:** Press button in BrickEmuPy → check PC trace after interrupt → replicate on FPGA → compare.
 
-### Phase 5: LCD Renderer (Week 6)
+### Phase 5: LCD Renderer (Week 6) — DONE
 
 ```
-Display RAM (CPU writes) ──→ Segment decoder ──→ Pixel bitmap ──→ HDMI
-                                    ↑
-                            MAME hh_ht11xx_lcd.lh [^26^]
-                            (COM,SEG) → (X,Y,WX,H) mapping
+General-purpose RAM (CPU writes) ──→ Segment lookup (from face SVG) ──→ lit/dark per segment
 ```
 
-**Display RAM:** Dual-port RAM. CPU writes via `displayram_w()`. Renderer reads and converts to pixels.
+Revised from the original plan once the actual reference behavior was
+read: HT943 has **no separate display RAM** — `HT943.get_VRAM()` just
+returns the same 256×4-bit RAM ordinary `MOV` instructions read/write.
+`brick_widget.py` doesn't use a MAME LCD layout file either; it derives
+the segment map directly from each `.brick`'s face SVG at draw time, by
+scanning for element ids of the form `"{ramByte}_{ramBit}"` (ramByte
+0-255 = RAM address, ramBit 0-3 = nibble bit — `_renderVRAM` computes
+`(RAM[ramByte] >> ramBit) & 1` per segment).
 
-**Segment decoder:** Static lookup table from MAME LCD layout file.
+So the RTL side needed no new decoder logic at all — just a debug read
+port (`dbg_ram_addr`/`dbg_ram_data` on `ht943_core`) exposing the
+existing `ram` array, since it already *is* the display RAM.
 
-**Test:** Run `E23PlusMarkII96in1.bin` for N seconds. Screenshot from BrickEmuPy vs screenshot from FPGA. Pixel-compare with tolerance.
+**Segment map:** `tools/extract_segments.py` — regexes the face SVG for
+`id="byte_bit"` pairs, exactly mirroring `brick_widget.py`'s own scan.
+
+**Test:** `sim/render_compare.py` — run reference and RTL over the same
+instruction/button sequence, dump both RAMs (`VRAM_OUT` env var on both
+`run_headless.py` and the Verilator testbench), and diff the *lit/dark
+boolean* of every segment named in the face SVG. This is bit-exact
+(no pixel tolerance needed, no MAME dependency) and is exactly as strong
+as a pixel-perfect screenshot compare would be, since the SVG is the
+same one both renderers would draw from. Folded into
+`sim/regression.py` for all 6 real ROMs — all PASS (128-320 segments
+each, 200k instructions).
 
 ### Phase 6: Audio (Week 7)
 

@@ -39,7 +39,13 @@ module ht943_core #(
     output logic [3:0]  wr0, wr1, wr2, wr3, wr4,
     output logic        cf,
     output logic [7:0]  tc,
-    output logic        ei, tf, ef, halt
+    output logic        ei, tf, ef, halt,
+
+    // Debug RAM read port for VRAM dumps (Phase 5 segment-state
+    // comparison). Same 256x4bit array the CPU uses for ordinary MOV
+    // instructions — HT943 has no separate display RAM, see HT943.get_VRAM().
+    input  logic [7:0]  dbg_ram_addr,
+    output logic [3:0]  dbg_ram_data
 );
 
     logic [7:0] rom [0:4095];
@@ -85,6 +91,7 @@ module ht943_core #(
     assign ef   = r_ef;
     assign halt = r_halt;
     assign opcode = r_halt ? 8'hFF : op;
+    assign dbg_ram_data = ram[dbg_ram_addr];
 
     function automatic [7:0] ram_addr_of(input int rp);
         ram_addr_of = {r_wr[rp+1], r_wr[rp]};

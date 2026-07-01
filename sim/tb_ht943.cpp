@@ -107,6 +107,23 @@ int main(int argc, char** argv) {
         top->eval();
     }
 
+    // VRAM_OUT=path: dump the final 256x4bit RAM (== HT943's VRAM, see
+    // HT943.get_VRAM()) via the debug read port, one hex nibble per byte.
+    if (const char* vram_out = std::getenv("VRAM_OUT")) {
+        FILE* f = std::fopen(vram_out, "w");
+        if (!f) {
+            std::fprintf(stderr, "cannot open VRAM_OUT=%s\n", vram_out);
+            return 2;
+        }
+        for (int addr = 0; addr < 256; addr++) {
+            top->dbg_ram_addr = addr;
+            top->eval();
+            std::fprintf(f, "%X", top->dbg_ram_data & 0xF);
+        }
+        std::fprintf(f, "\n");
+        std::fclose(f);
+    }
+
     top->final();
     delete top;
     return 0;

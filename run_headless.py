@@ -105,6 +105,13 @@ def run(brick_path, n_instructions, presses=()):
         cycles = cpu.clock()
         interconnect.emit_clock(cycles)
 
+    vram_out = os.environ.get('VRAM_OUT')
+    if vram_out:
+        # HT943 has no separate display RAM — get_VRAM() returns the same
+        # general-purpose RAM ordinary MOV instructions use (see HT943.py).
+        with open(vram_out, 'w') as f:
+            f.write(''.join(f'{v & 0xF:X}' for v in cpu.get_VRAM()) + '\n')
+
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:

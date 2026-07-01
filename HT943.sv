@@ -135,7 +135,10 @@ ht943_core ht943_core
 	.wr0(cpu_wr0), .wr1(cpu_wr1), .wr2(cpu_wr2), .wr3(cpu_wr3), .wr4(cpu_wr4),
 	.cf(cpu_cf),
 	.tc(cpu_tc),
-	.ei(cpu_ei), .tf(cpu_tf), .ef(cpu_ef), .halt(cpu_halt)
+	.ei(cpu_ei), .tf(cpu_tf), .ef(cpu_ef), .halt(cpu_halt),
+
+	// LCD renderer not wired up yet (Phase 5 in progress) — tie off.
+	.dbg_ram_addr(8'h0), .dbg_ram_data()
 );
 
 reg  [26:0] act_cnt;
