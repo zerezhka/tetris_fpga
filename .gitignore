@@ -1,3 +1,15 @@
 /BrickEmuPy/
 /ida-holtek-4bit/
 __pycache__/
+
+# Quartus build artifacts
+output_files/
+db/
+incremental_db/
+build_id.v
+jtag.cdf
+c5_pin_model_dump.txt
+cr_ie_info.json
+qmegawiz_errors_log.txt
+.cnxerr
+*.qws

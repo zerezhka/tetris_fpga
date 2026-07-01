@@ -13,7 +13,7 @@
 // modeling yet) — sufficient to match a headless run with no input events.
 
 module ht943_core #(
-    parameter string ROM_HEX_FILE = "",
+    parameter ROM_HEX_FILE = "",
     parameter int    TIMER_DIV    = 16,
     parameter logic [3:0] PP_PULLUP = 4'hF,
     parameter logic [3:0] PM_PULLUP = 4'hF,
@@ -49,7 +49,13 @@ module ht943_core #(
     logic [3:0]  r_pa;
     logic [3:0]  r_pp, r_pm, r_ps;
 
-    logic [3:0] ram [0:255];
+    // Read at many independently-computed addresses within the same
+    // combinational block (Phase 2's opcode case). Quartus 17.0's RAM
+    // read-port inference chokes on that pattern with an internal crash
+    // ("read to RAM wasn't mapped to a specific read port"); at 128 bytes
+    // this is cheap enough to force into LUT-based storage and sidestep
+    // block-RAM inference entirely.
+    (* ramstyle = "logic" *) logic [3:0] ram [0:255];
 
     assign pc   = r_pc;
     assign acc  = r_acc;
@@ -66,13 +72,10 @@ module ht943_core #(
     assign halt = r_halt;
     assign opcode = r_halt ? 8'hFF : rom[r_pc];
 
-    function automatic [7:0] rd_rom(input logic [11:0] a);
-        rd_rom = rom[a]; // ROM size is a power of two (4096) -> index wraps naturally
-    endfunction
-
     function automatic [7:0] ram_addr_of(input int rp);
         ram_addr_of = {r_wr[rp+1], r_wr[rp]};
     endfunction
+
 
     // ---- next-state combinational logic ----
     logic [11:0] n_pc;
@@ -86,6 +89,8 @@ module ht943_core #(
     logic [3:0]  ram_wdata;
     logic        ram_we;
     logic [7:0]  ram_waddr;
+    logic [7:0]  ram_raddr;
+    logic [3:0]  ram_rdata;
 
     logic [11:0] cur_pc;   // pc possibly redirected by interrupt, before fetch
     logic [7:0]  op;
@@ -110,6 +115,8 @@ module ht943_core #(
         ram_we    = 1'b0;
         ram_waddr = 8'h0;
         ram_wdata = 4'h0;
+        ram_raddr = 8'h0;
+        ram_rdata = 4'h0;
         ex_cycles = 4'd4;
         cur_pc    = r_pc;
         op        = 8'h00;
@@ -129,26 +136,38 @@ module ht943_core #(
                 end
             end
 
-            op  = rd_rom(cur_pc);
-            imm = rd_rom(cur_pc + 12'd1);
+            op  = rom[cur_pc];
+            imm = rom[cur_pc + 12'd1];
+
+            // Single RAM read port: Quartus 17.0's Verific elaborator
+            // crashes ("read to RAM wasn't mapped to a specific read port")
+            // when the same array is read from many call sites in one
+            // combinational process. Every op below reads @R1R0 (rp=0)
+            // except the @R3R2 group, so pick the address once and reuse
+            // ram_rdata everywhere instead of indexing `ram` per-branch.
+            unique casez (op)
+                8'h06, 8'h07, 8'h0E, 8'h0F: ram_raddr = ram_addr_of(2);
+                default:                    ram_raddr = ram_addr_of(0);
+            endcase
+            ram_rdata = ram[ram_raddr];
 
             unique casez (op)
                 8'h00: begin n_cf = r_acc[0]; n_acc = {n_cf, r_acc[3:1]}; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'h01: begin n_cf = r_acc[3]; n_acc = {r_acc[2:0], n_cf}; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'h02: begin logic new_cf; new_cf = r_acc[0]; n_acc = {r_cf, r_acc[3:1]}; n_cf = new_cf; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'h03: begin logic new_cf; new_cf = r_acc[3]; n_acc = {r_acc[2:0], r_cf}; n_cf = new_cf; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h04: begin n_acc = ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h04: begin n_acc = ram_rdata; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'h05: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h06: begin n_acc = ram[ram_addr_of(2)]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h06: begin n_acc = ram_rdata; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'h07: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h08: begin logic [4:0] s; s = ram[ram_addr_of(0)] + r_acc + r_cf; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h09: begin logic [4:0] s; s = ram[ram_addr_of(0)] + r_acc; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h0A: begin logic [4:0] s; s = (~ram[ram_addr_of(0)] & 4'hF) + r_acc + r_cf; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h0B: begin logic [4:0] s; s = (~ram[ram_addr_of(0)] & 4'hF) + r_acc + 5'd1; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h0C: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h0D: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h0E: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = ram[ram_addr_of(2)] + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h0F: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = ram[ram_addr_of(2)] - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h08: begin logic [4:0] s; s = ram_rdata + r_acc + r_cf; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h09: begin logic [4:0] s; s = ram_rdata + r_acc; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0A: begin logic [4:0] s; s = (~ram_rdata & 4'hF) + r_acc + r_cf; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0B: begin logic [4:0] s; s = (~ram_rdata & 4'hF) + r_acc + 5'd1; n_cf = s[4]; n_acc = s[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0C: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram_rdata + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0D: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram_rdata - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0E: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = ram_rdata + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h0F: begin ram_we = 1; ram_waddr = ram_addr_of(2); ram_wdata = ram_rdata - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'b0001_0??0, 8'b0001_1000: begin // inc_rn: 0x10,12,14,16,18 -> WRi=(op>>1)&7
                     int wi; wi = op[3:1];
                     n_wr[wi] = r_wr[wi] + 4'd1; n_pc = cur_pc + 1; ex_cycles = 4;
@@ -157,12 +176,12 @@ module ht943_core #(
                     int wi; wi = op[3:1];
                     n_wr[wi] = r_wr[wi] - 4'd1; n_pc = cur_pc + 1; ex_cycles = 4;
                 end
-                8'h1A: begin n_acc = r_acc & ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h1B: begin n_acc = r_acc ^ ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h1C: begin n_acc = r_acc | ram[ram_addr_of(0)]; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h1D: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] & r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h1E: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] ^ r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
-                8'h1F: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram[ram_addr_of(0)] | r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1A: begin n_acc = r_acc & ram_rdata; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1B: begin n_acc = r_acc ^ ram_rdata; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1C: begin n_acc = r_acc | ram_rdata; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1D: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram_rdata & r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1E: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram_rdata ^ r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
+                8'h1F: begin ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = ram_rdata | r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end
                 8'b0010_0??0, 8'b0010_1000: begin int wi; wi = op[3:1]; n_wr[wi] = r_acc; n_pc = cur_pc + 1; ex_cycles = 4; end // mov_rn_a (0x20,22,24,26,28)
                 8'b0010_0??1, 8'b0010_1001: begin int wi; wi = op[3:1]; n_acc = r_wr[wi]; n_pc = cur_pc + 1; ex_cycles = 4; end // mov_a_rn (0x21,23,25,27,29)
                 8'h2A: begin n_cf = 0; n_pc = cur_pc + 1; ex_cycles = 4; end
@@ -202,10 +221,10 @@ module ht943_core #(
                 8'h49: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_loop
                 8'h4A: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_off
                 8'h4B: begin n_pc = cur_pc + 1; ex_cycles = 4; end // sound_a
-                8'h4C: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({npc1[11:8], r_acc, ram[ram_addr_of(0)]}); n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
-                8'h4D: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({4'hF, r_acc, ram[ram_addr_of(0)]}); n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
-                8'h4E: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({npc1[11:8], r_acc, r_wr[4]}); n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
-                8'h4F: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rd_rom({4'hF, r_acc, r_wr[4]}); n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
+                8'h4C: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{npc1[11:8], r_acc, ram_rdata}]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
+                8'h4D: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{4'hF, r_acc, ram_rdata}]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
+                8'h4E: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{npc1[11:8], r_acc, r_wr[4]}]; n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
+                8'h4F: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{4'hF, r_acc, r_wr[4]}]; n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
                 8'b0101_????: begin n_wr[0] = op[3:0]; n_wr[1] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end // 0x50-5F MOV R1R0,xx
                 8'b0110_????: begin n_wr[2] = op[3:0]; n_wr[3] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end // 0x60-6F MOV R3R2,xx
                 8'b0111_????: begin n_acc = op[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end // 0x70-7F MOV A,x
