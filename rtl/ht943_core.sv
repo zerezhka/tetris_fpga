@@ -105,16 +105,44 @@ module ht943_core #(
     output logic        snd_tick_fx
 );
 
-    logic [7:0] rom [0:4095];
+    // Program ROM, stored TWICE:
+    //   rom16[i] = {byte[i+1], byte[i]} — every instruction always needs
+    //     both op@cur_pc and imm@cur_pc+1, so packing them into one 16-bit
+    //     word turns the always-needed fetch into a SINGLE synchronous
+    //     read (see r_rom16_q below) instead of two combinational ones.
+    //     M10K block RAM has no combinational/async read mode at all, so
+    //     the old single combinational `rom[cur_pc]`-style read could
+    //     never map to block RAM regardless of port count — that (not
+    //     just the port count) was the real reason Quartus fell back to
+    //     flip-flops + huge read-mux trees for the whole array.
+    //   rom_b[i] = byte[i] — plain byte-addressable mirror, used only for
+    //     the rare 3rd ROM read on LUT-table opcodes (0x4C-0x4F). Its
+    //     address depends on the CURRENT instruction's own opcode/operands
+    //     (only known combinationally this same cycle, not prefetchable a
+    //     cycle ahead like op/imm), so pipelining it would need a genuine
+    //     stall cycle. Given how rare these opcodes are, it's kept a
+    //     single-port combinational read forced into LUT/FF storage
+    //     instead (same tactic as `ram` below) rather than adding stall
+    //     logic to the retire path.
+    logic [15:0] rom16 [0:4095];
+    (* ramstyle = "logic" *) logic [7:0] rom_b [0:4095];
     initial begin
-        if (ROM_HEX_FILE != "")
-            $readmemh(ROM_HEX_FILE, rom);
+        if (ROM_HEX_FILE != "") begin
+            logic [7:0] rom_init [0:4095];
+            $readmemh(ROM_HEX_FILE, rom_init);
+            for (int i = 0; i < 4096; i++) begin
+                rom_b[i] = rom_init[i];
+                rom16[i] = {rom_init[(i + 1) % 4096], rom_init[i]};
+            end
+        end
     end
 
     // Sound ROM (20 channels x 32 bytes, see HT4BITsound.py SROM_SIZE) and
     // the per-channel speed_div/effect tables from the .brick's mask_options
     // (there are only 16 of each since channel/ACC select is 4-bit).
-    logic [7:0] sound_rom  [0:639];
+    // Small enough (640B) and read too rarely/irregularly to be worth
+    // pipelining like rom16 — forced into LUT/FF storage same as `ram`.
+    (* ramstyle = "logic" *) logic [7:0] sound_rom [0:639];
     logic [7:0] speed_div  [0:15];
     logic [7:0] sound_fx   [0:15];
     initial begin
@@ -240,6 +268,22 @@ module ht943_core #(
     logic [7:0]  op;
     logic [7:0]  imm;      // byte at cur_pc+1
     logic [3:0]  ex_cycles;
+    logic [11:0] w_lut_addr;
+
+    // op/imm are prefetched ONE instruction ahead: r_rom16_q is loaded (in
+    // the register-commit block below, same edge as r_pc etc.) with
+    // rom16[w_next_cur_pc] — w_next_cur_pc (computed at the bottom of the
+    // main always_comb) is THIS instruction's prospective successor
+    // address, mirroring the interrupt-redirect check below but evaluated
+    // on the n_-signals this instruction is about to commit. That overlaps
+    // the ROM fetch for instruction N+1 with the execute of instruction N,
+    // giving a genuine single-port synchronous read with ZERO added
+    // latency — unlike a "free-running, settles during idle time" scheme,
+    // this works even when `ce` is asserted on every single clk edge (as
+    // in the Verilator testbenches, where `clk` directly IS the CPU clock
+    // with no clk_sys division to provide idle settle time).
+    logic [15:0] r_rom16_q;
+    logic [11:0] w_next_cur_pc;
 
     always_comb begin
         // defaults: hold state
@@ -273,6 +317,7 @@ module ht943_core #(
         cur_pc    = r_pc;
         op        = 8'h00;
         imm       = 8'h00;
+        w_lut_addr = 12'h0;
 
         if (!r_halt) begin
             // interrupt check (only when the 1-level stack is free)
@@ -288,8 +333,10 @@ module ht943_core #(
                 end
             end
 
-            op  = rom[cur_pc];
-            imm = rom[cur_pc + 12'd1];
+            // op/imm come from r_rom16_q, prefetched one instruction ahead
+            // (see the r_rom16_q comment up top / w_next_cur_pc below).
+            op  = r_rom16_q[7:0];
+            imm = r_rom16_q[15:8];
 
             // Single RAM read port: Quartus 17.0's Verific elaborator
             // crashes ("read to RAM wasn't mapped to a specific read port")
@@ -302,6 +349,23 @@ module ht943_core #(
                 default:                    ram_raddr = ram_addr_of(0);
             endcase
             ram_rdata = ram[ram_raddr];
+
+            // LUT-table opcodes (0x4C-0x4F) address rom_b by op/r_acc/
+            // ram_rdata-or-r_wr[4]/cur_pc+1's high nibble. Computed here
+            // (harmlessly, even for other opcodes) so the registered read
+            // below has a full extra clk_sys cycle to settle before this
+            // op could possibly retire.
+            begin
+                logic [11:0] w_npc1;
+                w_npc1 = cur_pc + 12'd1;
+                unique casez (op)
+                    8'h4C: w_lut_addr = {w_npc1[11:8], r_acc, ram_rdata};
+                    8'h4D: w_lut_addr = {4'hF,         r_acc, ram_rdata};
+                    8'h4E: w_lut_addr = {w_npc1[11:8], r_acc, r_wr[4]};
+                    8'h4F: w_lut_addr = {4'hF,         r_acc, r_wr[4]};
+                    default: w_lut_addr = 12'h0;
+                endcase
+            end
 
             unique casez (op)
                 8'h00: begin n_cf = r_acc[0]; n_acc = {n_cf, r_acc[3:1]}; n_pc = cur_pc + 1; ex_cycles = 4; end
@@ -379,10 +443,12 @@ module ht943_core #(
                     n_snd_on = 1; n_snd_channel = r_acc; n_snd_note_ctr = 6'd0;
                     n_pc = cur_pc + 1; ex_cycles = 4;
                 end
-                8'h4C: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{npc1[11:8], r_acc, ram_rdata}]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
-                8'h4D: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{4'hF, r_acc, ram_rdata}]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
-                8'h4E: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{npc1[11:8], r_acc, r_wr[4]}]; n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
-                8'h4F: begin logic [7:0] b; logic [11:0] npc1; npc1 = cur_pc + 12'd1; b = rom[{4'hF, r_acc, r_wr[4]}]; n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
+                // b comes from rom_b[w_lut_addr] (w_lut_addr computed above
+                // from the now-known `op`/r_acc/ram_rdata/r_wr[4]/cur_pc+1).
+                8'h4C: begin logic [11:0] npc1; logic [7:0] b; npc1 = cur_pc + 12'd1; b = rom_b[w_lut_addr]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
+                8'h4D: begin logic [11:0] npc1; logic [7:0] b; npc1 = cur_pc + 12'd1; b = rom_b[w_lut_addr]; n_pc = npc1; n_acc = b[3:0]; n_wr[4] = b[7:4]; ex_cycles = 8; end
+                8'h4E: begin logic [11:0] npc1; logic [7:0] b; npc1 = cur_pc + 12'd1; b = rom_b[w_lut_addr]; n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
+                8'h4F: begin logic [11:0] npc1; logic [7:0] b; npc1 = cur_pc + 12'd1; b = rom_b[w_lut_addr]; n_pc = npc1; n_acc = b[3:0]; ram_we = 1; ram_waddr = ram_addr_of(0); ram_wdata = b[7:4]; ex_cycles = 8; end
                 8'b0101_????: begin n_wr[0] = op[3:0]; n_wr[1] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end // 0x50-5F MOV R1R0,xx
                 8'b0110_????: begin n_wr[2] = op[3:0]; n_wr[3] = imm[3:0]; n_pc = cur_pc + 2; ex_cycles = 8; end // 0x60-6F MOV R3R2,xx
                 8'b0111_????: begin n_acc = op[3:0]; n_pc = cur_pc + 1; ex_cycles = 4; end // 0x70-7F MOV A,x
@@ -480,12 +546,35 @@ module ht943_core #(
                 n_halt = 1'b0;
             end
         end
+
+        // Prospective fetch address for the NEXT instruction (see
+        // r_rom16_q / w_next_cur_pc comments up top): mirrors the
+        // interrupt-redirect check above exactly, but evaluated on the
+        // n_-signals THIS instruction is about to commit, since those
+        // become r_ei/r_stack/r_ef/r_tf/r_pc for the next cycle. Guarded
+        // by !n_halt the same way the check above is guarded by !r_halt —
+        // interrupts are never taken while halted.
+        w_next_cur_pc = n_pc;
+        if (!n_halt && n_ei && n_stack == 13'd0) begin
+            if (n_ef)      w_next_cur_pc = 12'h008;
+            else if (n_tf) w_next_cur_pc = 12'h004;
+        end
     end
 
     always_ff @(posedge clk) begin
         // Memory writes happen at clk_sys speed regardless of ce (MiSTer
         // downloads run much faster than the emulated CPU clock).
-        if (rom_wr)  rom[rom_addr]       <= rom_data;
+        // Each incoming byte updates its own rom_b entry plus the low byte
+        // of its own rom16 word and the high byte of the PRECEDING rom16
+        // word (rom16[i] = {byte[i+1], byte[i]}) — order-independent, so
+        // ioctl_download's natural increasing-address byte stream just
+        // works, wraparound (addr 0 <-> 4095) included via plain 12-bit
+        // subtraction.
+        if (rom_wr) begin
+            rom_b[rom_addr]              <= rom_data;
+            rom16[rom_addr][7:0]         <= rom_data;
+            rom16[rom_addr - 12'd1][15:8] <= rom_data;
+        end
         if (srom_wr) sound_rom[srom_addr] <= srom_data;
         if (spd_wr)  speed_div[spd_addr]  <= spd_data;
         if (fx_wr)   sound_fx[fx_addr]    <= fx_data;
@@ -537,6 +626,7 @@ module ht943_core #(
             // HT943._reset() zeroes the RAM too (not just registers) —
             // without this a mid-game reset would resume with stale VRAM.
             for (int i = 0; i < 256; i++) ram[i] <= 4'h0;
+            r_rom16_q <= rom16[12'h0];    // prefetch for PC=0, the first fetch after reset
         end else if (ce) begin
             r_pc <= n_pc;
             r_acc <= n_acc;
@@ -563,6 +653,7 @@ module ht943_core #(
             r_snd_tick_note <= n_snd_tick_note;
             r_snd_tick_fx <= n_snd_tick_fx;
             if (ram_we) ram[ram_waddr] <= ram_wdata;
+            r_rom16_q <= rom16[w_next_cur_pc];  // prefetch op/imm for the next instruction
         end
     end
 
