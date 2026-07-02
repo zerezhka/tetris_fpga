@@ -7,7 +7,11 @@
 //
 // Commands (one per line on stdin, one response line on stdout each):
 //   STEP <n>       run n clock edges (instructions) with no trace output
-//                  -> "OK"
+//                  -> "OK" followed by the audio events that occurred, in
+//                  order: "NN:F" (hex sROM note byte emitted at a sound-
+//                  engine tick, F = channel effect bit; note 00 means
+//                  silence-but-still-playing) or "S" (sound engine shut
+//                  off). e.g. "OK 1A:1 00:1 S"
 //   PIN <PP|PM|PS> <value>   set a port's pin value (applied from the next
 //                  STEP's clock edges onward) -> "OK"
 //   VRAM           dump the 256x4bit RAM (== HT943.get_VRAM()) as one hex
@@ -49,7 +53,9 @@ int main(int argc, char** argv) {
         if (!std::strcmp(cmd, "STEP")) {
             long n = 0;
             std::sscanf(line, "%*s %ld", &n);
+            std::string events;
             for (long i = 0; i < n; i++) {
+                bool was_on = top->snd_on & 1;
                 top->pp_in = pp;
                 top->pm_in = pm;
                 top->ps_in = ps;
@@ -58,8 +64,21 @@ int main(int argc, char** argv) {
                 top->eval();
                 top->clk = 1;
                 top->eval();
+                // Mirror HT4BITsound.clock()'s emit_audio stream: one
+                // event per note tick, plus a stop when the engine turns
+                // off (end of a non-repeating cycle emits its last note
+                // AND turns off — both events, in that order, like the
+                // reference).
+                if (top->snd_tick & 1) {
+                    char ev[8];
+                    std::snprintf(ev, sizeof(ev), " %02X:%d",
+                                  top->snd_tick_note & 0xFF, top->snd_tick_fx & 1);
+                    events += ev;
+                }
+                if (was_on && !(top->snd_on & 1))
+                    events += " S";
             }
-            std::printf("OK\n");
+            std::printf("OK%s\n", events.c_str());
         } else if (!std::strcmp(cmd, "PIN")) {
             char port[4] = {0};
             int value = 0;

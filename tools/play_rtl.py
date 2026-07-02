@@ -13,9 +13,11 @@ shortcuts BrickEmuPy ships are driven by our RTL's VRAM instead.
 
 Usage: python3 tools/play_rtl.py <path/to/name.brick>
 
-Limitations vs. the real BrickEmuPy: no audio, no debug/step/breakpoints,
-no pause — this is meant for eyeballing that the RTL plays correctly, not
-as a full BrickEmuPy replacement.
+Limitations vs. the real BrickEmuPy: no debug/step/breakpoints, no pause —
+this is meant for eyeballing that the RTL plays correctly, not as a full
+BrickEmuPy replacement. Audio works: the RTL captures each sound-engine
+note tick (snd_tick outputs) and RTLEmulatorProcess feeds them to
+BrickEmuPy's own audio engine.
 """
 import json
 import multiprocessing

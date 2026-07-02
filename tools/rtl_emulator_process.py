@@ -13,9 +13,10 @@ core — see tools/play_rtl.py, which monkeypatches brick_widget.
 EmulatorProcess with RTLEmulatorProcess before constructing BrickWidget.
 
 Only the subset of the protocol needed to play a game is implemented:
-button press/release and periodic VRAM pushes for rendering. Debug
-stepping/breakpoints/audio are not — RTL playback here is silent and
-always "running".
+button press/release, periodic VRAM pushes for rendering, and audio
+(MSG_SOUND_DATA events reconstructed from the RTL's snd_tick capture —
+see tb_ht943_interactive.cpp's STEP reply format). Debug
+stepping/breakpoints are not — RTL playback here is always "running".
 """
 import os
 import queue
@@ -25,6 +26,8 @@ from time import perf_counter_ns, sleep
 
 MSG_VRAM = 10
 MSG_ERROR = 20
+MSG_SOUND_DATA = 30
+MSG_SOUND_RESET = 31
 
 CMD_QUIT = 0
 CMD_BTN_PRESS = 80
@@ -86,6 +89,30 @@ class RTLEmulatorProcess:
             pullup_level = (port_pullup[port] >> bit) & 1
             set_bit(port, bit, pullup_level)
 
+        # Same note-byte -> Hz conversion as HT4BITsound._get_freq (the
+        # RTL reports the raw emitted sROM note byte; frequency synthesis
+        # stays on this side where BrickEmuPy's audio engine lives).
+        # BrickEmuPy/ is on sys.path in this spawned process too —
+        # multiprocessing's spawn propagates the parent's sys.path, and
+        # play_rtl.py inserted it before launching.
+        from cores.HT4BITsound import LFSR2DIV, SQUARENESS_FACTOR, CHANNEL
+        clock = self._config['clock']
+        freq_div = mask['sound_freq_div']
+
+        def emit_audio_events(step_reply, tick_ns):
+            for token in step_reply.split()[1:]:
+                if token == 'S':
+                    data = None
+                else:
+                    note_hex, fx = token.split(':')
+                    note = int(note_hex, 16)
+                    if note == 0:
+                        data = None
+                    else:
+                        data = (clock / freq_div / LFSR2DIV[note] * 2,
+                                int(fx), SQUARENESS_FACTOR, 0)
+                self._data_queue.put((MSG_SOUND_DATA, CHANNEL, data, tick_ns))
+
         # HT4BIT.clock() always reports a flat 8 "cycles" per instruction to
         # the reference's own real-time pacing loop (EmulatorProcess.run),
         # regardless of the opcode's actual 4-or-8-cycle cost — match that
@@ -119,8 +146,9 @@ class RTLEmulatorProcess:
                 now = perf_counter_ns()
                 instr_budget = int((now - last_tick) / (cycle_time_ns * 8))
                 if instr_budget > 0:
-                    send(f'STEP {instr_budget}')
+                    reply = send(f'STEP {instr_budget}')
                     last_tick += instr_budget * 8 * cycle_time_ns
+                    emit_audio_events(reply, last_tick)
 
                 if now > next_display:
                     next_display += DISPLAY_UPDATE_NS
@@ -129,6 +157,7 @@ class RTLEmulatorProcess:
 
                 sleep(0.001)
         finally:
+            self._data_queue.put((MSG_SOUND_RESET,))
             try:
                 send('QUIT')
             except Exception:

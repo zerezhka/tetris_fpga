@@ -63,7 +63,19 @@ module ht943_core #(
     output logic [3:0]  snd_channel,
     output logic [5:0]  snd_note_ctr,
     output logic [7:0]  snd_note,
-    output logic        snd_fx
+    output logic        snd_fx,
+
+    // Audio event capture: HT4BITsound.clock() emits one audio event per
+    // note tick (the sROM note at the PRE-increment counter, on the
+    // possibly-just-set channel). snd_note above reads at the current
+    // counter, i.e. the NEXT note after a tick, so the emitted stream
+    // can't be reconstructed by sampling it — instead these latch the
+    // event itself: snd_tick pulses for one instruction after a tick,
+    // with the emitted note byte (0 == silence) and the ticking channel's
+    // effect bit.
+    output logic        snd_tick,
+    output logic [7:0]  snd_tick_note,
+    output logic        snd_tick_fx
 );
 
     logic [7:0] rom [0:4095];
@@ -120,6 +132,9 @@ module ht943_core #(
     logic [3:0]  r_snd_channel;
     logic [5:0]  r_snd_note_ctr;
     logic signed [23:0] r_snd_clk_cnt;
+    logic        r_snd_tick;
+    logic [7:0]  r_snd_tick_note;
+    logic        r_snd_tick_fx;
 
     // Read at many independently-computed addresses within the same
     // combinational block (Phase 2's opcode case). Quartus 17.0's RAM
@@ -165,6 +180,10 @@ module ht943_core #(
     assign snd_note = sound_rom[snd_chan_offset + {4'd0, r_snd_note_ctr}];
     assign snd_fx = sound_fx[r_snd_channel][0];
 
+    assign snd_tick      = r_snd_tick;
+    assign snd_tick_note = r_snd_tick_note;
+    assign snd_tick_fx   = r_snd_tick_fx;
+
     function automatic [7:0] ram_addr_of(input int rp);
         ram_addr_of = {r_wr[rp+1], r_wr[rp]};
     endfunction
@@ -183,6 +202,9 @@ module ht943_core #(
     logic [3:0]  n_snd_channel;
     logic [5:0]  n_snd_note_ctr;
     logic signed [23:0] n_snd_clk_cnt;
+    logic        n_snd_tick;
+    logic [7:0]  n_snd_tick_note;
+    logic        n_snd_tick_fx;
     logic [3:0]  ram_wdata;
     logic        ram_we;
     logic [7:0]  ram_waddr;
@@ -214,6 +236,9 @@ module ht943_core #(
         n_snd_channel = r_snd_channel;
         n_snd_note_ctr = r_snd_note_ctr;
         n_snd_clk_cnt = r_snd_clk_cnt;
+        n_snd_tick = 1'b0;           // pulse: only set on a tick below
+        n_snd_tick_note = r_snd_tick_note;
+        n_snd_tick_fx   = r_snd_tick_fx;
         ram_we    = 1'b0;
         ram_waddr = 8'h0;
         ram_wdata = 4'h0;
@@ -399,11 +424,22 @@ module ht943_core #(
                 logic [3:0] chan;
                 logic [6:0] chan_size;
                 logic [5:0] nc;
+                logic [9:0] toff;
                 cnt = n_snd_clk_cnt - {{20{1'b0}}, ex_cycles};
                 if (cnt <= 0) begin
                     chan = n_snd_channel;
                     cnt = cnt + (24'(LFSR2DIV[speed_div[chan]]) * 24'(SOUND_FREQ_DIV) * 24'd16);
                     chan_size = (chan >= 4'd12) ? 7'd64 : 7'd32;
+                    // latch the audio event HT4BITsound.clock() emits at
+                    // this tick: sROM note at the pre-increment counter
+                    // (offset formula from _get_freq, with its `> 12`
+                    // asymmetry vs the `>= 12` size check above)
+                    toff = {6'd0, chan} * 10'd32;
+                    if (chan > 4'd12)
+                        toff = toff + (({6'd0, chan} - 10'd12) * 10'd32);
+                    n_snd_tick = 1'b1;
+                    n_snd_tick_note = sound_rom[toff + {4'd0, n_snd_note_ctr}];
+                    n_snd_tick_fx   = sound_fx[chan][0];
                     nc = n_snd_note_ctr + 6'd1;
                     if ({1'b0, nc} >= chan_size) nc = 6'd0;
                     n_snd_note_ctr = nc;
@@ -448,6 +484,9 @@ module ht943_core #(
             r_snd_channel <= 4'h0;
             r_snd_note_ctr <= 6'h0;
             r_snd_clk_cnt <= 24'sd0;
+            r_snd_tick <= 1'b0;
+            r_snd_tick_note <= 8'h0;
+            r_snd_tick_fx <= 1'b0;
         end else begin
             r_pc <= n_pc;
             r_acc <= n_acc;
@@ -470,6 +509,9 @@ module ht943_core #(
             r_snd_channel <= n_snd_channel;
             r_snd_note_ctr <= n_snd_note_ctr;
             r_snd_clk_cnt <= n_snd_clk_cnt;
+            r_snd_tick <= n_snd_tick;
+            r_snd_tick_note <= n_snd_tick_note;
+            r_snd_tick_fx <= n_snd_tick_fx;
             if (ram_we) ram[ram_waddr] <= ram_wdata;
         end
     end
