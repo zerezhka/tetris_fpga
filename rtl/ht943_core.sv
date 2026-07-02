@@ -170,14 +170,16 @@ module ht943_core #(
     assign snd_note_ctr = r_snd_note_ctr;
 
     // sROM offset formula from HT4BITsound._get_freq: channel*32, plus an
-    // extra (channel-12)*32 for channels beyond the 12 single-size ones.
-    logic [9:0] snd_chan_offset;
-    always_comb begin
-        snd_chan_offset = {6'd0, r_snd_channel} * 10'd32;
-        if (r_snd_channel > 4'd12)
-            snd_chan_offset = snd_chan_offset + (({6'd0, r_snd_channel} - 10'd12) * 10'd32);
-    end
-    assign snd_note = sound_rom[snd_chan_offset + {4'd0, r_snd_note_ctr}];
+    // extra (channel-12)*32 for channels beyond the 12 single-size ones
+    // (`> 12`, not `>= 12` — the reference's own asymmetry vs its size
+    // check).
+    function automatic [9:0] srom_offset(input logic [3:0] chan);
+        srom_offset = {6'd0, chan} * 10'd32;
+        if (chan > 4'd12)
+            srom_offset = srom_offset + (({6'd0, chan} - 10'd12) * 10'd32);
+    endfunction
+
+    assign snd_note = sound_rom[srom_offset(r_snd_channel) + {4'd0, r_snd_note_ctr}];
     assign snd_fx = sound_fx[r_snd_channel][0];
 
     assign snd_tick      = r_snd_tick;
@@ -432,11 +434,7 @@ module ht943_core #(
                     chan_size = (chan >= 4'd12) ? 7'd64 : 7'd32;
                     // latch the audio event HT4BITsound.clock() emits at
                     // this tick: sROM note at the pre-increment counter
-                    // (offset formula from _get_freq, with its `> 12`
-                    // asymmetry vs the `>= 12` size check above)
-                    toff = {6'd0, chan} * 10'd32;
-                    if (chan > 4'd12)
-                        toff = toff + (({6'd0, chan} - 10'd12) * 10'd32);
+                    toff = srom_offset(chan);
                     n_snd_tick = 1'b1;
                     n_snd_tick_note = sound_rom[toff + {4'd0, n_snd_note_ctr}];
                     n_snd_tick_fx   = sound_fx[chan][0];
@@ -487,6 +485,9 @@ module ht943_core #(
             r_snd_tick <= 1'b0;
             r_snd_tick_note <= 8'h0;
             r_snd_tick_fx <= 1'b0;
+            // HT943._reset() zeroes the RAM too (not just registers) —
+            // without this a mid-game reset would resume with stale VRAM.
+            for (int i = 0; i < 256; i++) ram[i] <= 4'h0;
         end else begin
             r_pc <= n_pc;
             r_acc <= n_acc;

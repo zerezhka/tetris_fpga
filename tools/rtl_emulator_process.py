@@ -133,10 +133,24 @@ class RTLEmulatorProcess:
                             break
                         elif op == CMD_BTN_PRESS and cmd[1] in direct_input:
                             cfg = direct_input[cmd[1]]
-                            set_bit(cfg['port'], cfg['mask'], cfg['level'])
+                            if cfg['port'] == 'RES':
+                                # HT943._pin_set('RES'): immediate reset,
+                                # held until release; cuts any playing
+                                # sound (reply is in STEP's event format)
+                                # and forgets held buttons (ports go back
+                                # to pullup until re-pressed)
+                                emit_audio_events(send('RST 1'), last_tick)
+                                for port, value in port_pullup.items():
+                                    port_state[port] = value
+                                    send(f'PIN {port} {value}')
+                            elif cfg['port'] in port_state:
+                                set_bit(cfg['port'], cfg['mask'], cfg['level'])
                         elif op == CMD_BTN_RELEASE and cmd[1] in direct_input:
                             cfg = direct_input[cmd[1]]
-                            release_bit(cfg['port'], cfg['mask'])
+                            if cfg['port'] == 'RES':
+                                send('RST 0')
+                            elif cfg['port'] in port_state:
+                                release_bit(cfg['port'], cfg['mask'])
                 except queue.Empty:
                     pass
 

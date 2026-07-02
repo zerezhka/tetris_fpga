@@ -14,6 +14,14 @@
 //                  off). e.g. "OK 1A:1 00:1 S"
 //   PIN <PP|PM|PS> <value>   set a port's pin value (applied from the next
 //                  STEP's clock edges onward) -> "OK"
+//   RST <0|1>      assert/release the reset line (the RES "port" of
+//                  BrickEmuPy's direct_input). RST 1 applies one clock
+//                  edge immediately — HT943._pin_set('RES') resets on the
+//                  spot, not on the next instruction — and replies in
+//                  STEP's event format ("OK S" if a sound got cut) so the
+//                  caller can stop audio; while held, STEPs retire
+//                  nothing and VRAM reads blank. RST 0 -> "OK", core
+//                  restarts from PC 0 on the next STEP.
 //   VRAM           dump the 256x4bit RAM (== HT943.get_VRAM()) as one hex
 //                  digit per byte -> 256 hex chars
 //   QUIT           exit
@@ -22,6 +30,7 @@
 
 #include "Vht943_core.h"
 #include "verilated.h"
+#include "vram_dump.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,6 +53,7 @@ int main(int argc, char** argv) {
     top->clk = 1;
     top->eval();
     top->rst = 0;
+    bool rst_held = false;
 
     char line[256];
     while (std::fgets(line, sizeof(line), stdin)) {
@@ -87,24 +97,25 @@ int main(int argc, char** argv) {
             else if (!std::strcmp(port, "PM")) pm = value;
             else if (!std::strcmp(port, "PS")) ps = value;
             std::printf("OK\n");
-        } else if (!std::strcmp(cmd, "VRAM")) {
-            std::string out;
-            out.reserve(256);
-            // Mirrors HT943.get_VRAM(): while halted, the reference
-            // reports EMPTY_VRAM (all zeros) instead of the raw RAM, so
-            // the display goes blank on power-off instead of freezing on
-            // the last drawn frame.
-            bool blank = top->halt;
-            for (int addr = 0; addr < 256; addr++) {
-                char nibble[2] = {'0', '\0'};
-                if (!blank) {
-                    top->dbg_ram_addr = addr;
-                    top->eval();
-                    std::snprintf(nibble, sizeof(nibble), "%X", top->dbg_ram_data & 0xF);
-                }
-                out += nibble[0];
+        } else if (!std::strcmp(cmd, "RST")) {
+            int value = 0;
+            std::sscanf(line, "%*s %d", &value);
+            rst_held = value != 0;
+            top->rst = rst_held;
+            if (rst_held) {
+                bool was_on = top->snd_on & 1;
+                top->clk = 0;
+                top->eval();
+                top->clk = 1;
+                top->eval();
+                std::printf(was_on ? "OK S\n" : "OK\n");
+            } else {
+                std::printf("OK\n");
             }
-            std::printf("%s\n", out.c_str());
+        } else if (!std::strcmp(cmd, "VRAM")) {
+            char buf[257];
+            dump_vram(top, top->halt || rst_held, buf);
+            std::printf("%s\n", buf);
         } else if (!std::strcmp(cmd, "QUIT")) {
             break;
         } else {
