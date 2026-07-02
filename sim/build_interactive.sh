@@ -51,6 +51,7 @@ python3 "$ROOT/tools/gen_sound_params.py" "$SPEED_DIV_CSV" "$SPEED_HEX" "$EFFECT
 
 verilator --cc --exe --build -j 0 \
     --top-module ht943_core \
+    -I"$ROOT" \
     -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNOPTFLAT -Wno-LATCH \
     -GROM_HEX_FILE="\"$HEX\"" -GTIMER_DIV="$TIMER_DIV" \
     -GPP_PULLUP="4'd$PP" -GPM_PULLUP="4'd$PM" -GPS_PULLUP="4'd$PS" \

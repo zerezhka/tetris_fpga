@@ -37,7 +37,34 @@ module ht943_core #(
     parameter int SOUND_FREQ_DIV = 64
 ) (
     input  logic        clk,
-    input  logic         rst,
+    input  logic        rst,
+
+    // CPU clock enable. When low the architectural state is frozen; this lets
+    // the MiSTer top-level run the 1-instruction-per-clock core at the real
+    // HT943 clock rate (256 kHz–1 MHz) while surrounding logic stays on clk_sys.
+    input  logic        ce,
+
+    // Runtime ROM / sound-ROM / parameter loading. These ports are optional;
+    // when unused the compile-time parameters and $readmemh files apply.
+    input  logic        rom_wr,
+    input  logic [11:0] rom_addr,
+    input  logic [7:0]  rom_data,
+
+    input  logic        srom_wr,
+    input  logic [9:0]  srom_addr,
+    input  logic [7:0]  srom_data,
+
+    input  logic        spd_wr,
+    input  logic [3:0]  spd_addr,
+    input  logic [7:0]  spd_data,
+
+    input  logic        fx_wr,
+    input  logic [3:0]  fx_addr,
+    input  logic [7:0]  fx_data,
+
+    input  logic        cfg_wr,
+    input  logic [3:0]  cfg_addr,
+    input  logic [7:0]  cfg_data,
 
     input  logic [3:0]  pp_in, pm_in, ps_in,
 
@@ -96,27 +123,23 @@ module ht943_core #(
         if (EFFECT_HEX_FILE    != "") $readmemh(EFFECT_HEX_FILE, sound_fx);
     end
 
-    // HT4BITsound.py's LFSR2DIV table — converts a raw sROM note byte into
-    // a clock-divider ratio. Fixed hardware/firmware constant, never varies
-    // per-ROM, so it's embedded directly rather than loaded from a file.
-    localparam logic [7:0] LFSR2DIV [0:127] = '{
-        8'd0,   8'd2,   8'd123, 8'd3,   8'd124, 8'd75,  8'd117, 8'd4,
-        8'd125, 8'd101, 8'd111, 8'd76,  8'd118, 8'd42,  8'd69,  8'd5,
-        8'd126, 8'd66,  8'd63,  8'd102, 8'd112, 8'd86,  8'd36,  8'd77,
-        8'd119, 8'd21,  8'd95,  8'd43,  8'd70,  8'd25,  8'd105, 8'd6,
-        8'd127, 8'd115, 8'd99,  8'd67,  8'd64,  8'd34,  8'd19,  8'd103,
-        8'd113, 8'd17,  8'd15,  8'd87,  8'd37,  8'd55,  8'd89,  8'd78,
-        8'd120, 8'd39,  8'd60,  8'd22,  8'd96,  8'd52,  8'd57,  8'd44,
-        8'd71,  8'd91,  8'd30,  8'd26,  8'd106, 8'd47,  8'd80,  8'd7,
-        8'd1,   8'd122, 8'd74,  8'd116, 8'd100, 8'd110, 8'd41,  8'd68,
-        8'd65,  8'd62,  8'd85,  8'd35,  8'd20,  8'd94,  8'd24,  8'd104,
-        8'd114, 8'd98,  8'd33,  8'd18,  8'd16,  8'd14,  8'd54,  8'd88,
-        8'd38,  8'd59,  8'd51,  8'd56,  8'd90,  8'd29,  8'd46,  8'd79,
-        8'd121, 8'd73,  8'd109, 8'd40,  8'd61,  8'd84,  8'd93,  8'd23,
-        8'd97,  8'd32,  8'd13,  8'd53,  8'd58,  8'd50,  8'd28,  8'd45,
-        8'd72,  8'd108, 8'd83,  8'd92,  8'd31,  8'd12,  8'd49,  8'd27,
-        8'd107, 8'd82,  8'd11,  8'd48,  8'd81,  8'd10,  8'd9,   8'd8
-    };
+    // Runtime parameter registers. Reset reloads the compile-time defaults so
+    // existing simulation testbenches keep working unchanged.
+    //
+    // Port pullup values are NOT among these: nothing in this module ever
+    // reads PP_PULLUP/PM_PULLUP/PS_PULLUP for CPU behavior — pp_in/pm_in/
+    // ps_in are continuously-sampled external pins (see the file header
+    // comment), and it's whatever drives them that's responsible for
+    // idling an unpressed pin at its pullup level, same as a real chip's
+    // external pull resistors. The compile-time PP/PM/PS_PULLUP
+    // parameters below exist only to seed r_pp/pm/ps_prev's edge-detect
+    // state at reset; runtime cfg_wr overrides of them would be dead
+    // registers nothing reads, so that path was removed.
+    logic [15:0] r_timer_div;
+    logic [3:0]  r_pp_wakeup, r_pm_wakeup, r_ps_wakeup;
+    logic [15:0] r_sound_freq_div;
+
+    `include "rtl/lfsr2div.svh"
 
     // ---- architectural state ----
     logic [11:0] r_pc;
@@ -404,7 +427,7 @@ module ht943_core #(
                 tfv = n_tf;
                 for (int iter = 0; iter < 64; iter++) begin
                     if (cnt <= 0) begin
-                        cnt = cnt + TIMER_DIV;
+                        cnt = cnt + r_timer_div;
                         if (n_timerf) begin
                             tcv = tcv + 8'd1;
                             if (tcv == 8'd0) tfv = 1'b1;
@@ -430,7 +453,7 @@ module ht943_core #(
                 cnt = n_snd_clk_cnt - {{20{1'b0}}, ex_cycles};
                 if (cnt <= 0) begin
                     chan = n_snd_channel;
-                    cnt = cnt + (24'(LFSR2DIV[speed_div[chan]]) * 24'(SOUND_FREQ_DIV) * 24'd16);
+                    cnt = cnt + (24'(LFSR2DIV[speed_div[chan]]) * 24'(r_sound_freq_div) * 24'd16);
                     chan_size = (chan >= 4'd12) ? 7'd64 : 7'd32;
                     // latch the audio event HT4BITsound.clock() emits at
                     // this tick: sROM note at the pre-increment counter
@@ -450,9 +473,9 @@ module ht943_core #(
             // once on a masked pin's falling *transition* — not merely
             // reading low — so a button already held before HLT executed
             // does not wake the CPU (matches the reference exactly).
-            if (((PP_WAKEUP & r_pp_prev & ~pp_in) != 4'h0) ||
-                ((PM_WAKEUP & r_pm_prev & ~pm_in) != 4'h0) ||
-                ((PS_WAKEUP & r_ps_prev & ~ps_in) != 4'h0)) begin
+            if (((r_pp_wakeup & r_pp_prev & ~pp_in) != 4'h0) ||
+                ((r_pm_wakeup & r_pm_prev & ~pm_in) != 4'h0) ||
+                ((r_ps_wakeup & r_ps_prev & ~ps_in) != 4'h0)) begin
                 n_ef   = 1'b1;
                 n_halt = 1'b0;
             end
@@ -460,6 +483,32 @@ module ht943_core #(
     end
 
     always_ff @(posedge clk) begin
+        // Memory writes happen at clk_sys speed regardless of ce (MiSTer
+        // downloads run much faster than the emulated CPU clock).
+        if (rom_wr)  rom[rom_addr]       <= rom_data;
+        if (srom_wr) sound_rom[srom_addr] <= srom_data;
+        if (spd_wr)  speed_div[spd_addr]  <= spd_data;
+        if (fx_wr)   sound_fx[fx_addr]    <= fx_data;
+
+        if (rst) begin
+            r_timer_div      <= TIMER_DIV;
+            r_sound_freq_div <= SOUND_FREQ_DIV;
+            r_pp_wakeup <= PP_WAKEUP;
+            r_pm_wakeup <= PM_WAKEUP;
+            r_ps_wakeup <= PS_WAKEUP;
+        end else if (cfg_wr) begin
+            case (cfg_addr)
+                4'd0: r_timer_div[7:0]  <= cfg_data;
+                4'd1: r_timer_div[15:8] <= cfg_data;
+                4'd2: r_pp_wakeup <= cfg_data[3:0];
+                4'd3: r_pm_wakeup <= cfg_data[3:0];
+                4'd4: r_ps_wakeup <= cfg_data[3:0];
+                4'd5: r_sound_freq_div[7:0]  <= cfg_data;
+                4'd6: r_sound_freq_div[15:8] <= cfg_data;
+                default: ;
+            endcase
+        end
+
         if (rst) begin
             r_pc <= 12'h0;
             r_acc <= 4'h0;
@@ -488,7 +537,7 @@ module ht943_core #(
             // HT943._reset() zeroes the RAM too (not just registers) —
             // without this a mid-game reset would resume with stale VRAM.
             for (int i = 0; i < 256; i++) ram[i] <= 4'h0;
-        end else begin
+        end else if (ce) begin
             r_pc <= n_pc;
             r_acc <= n_acc;
             for (int i = 0; i < 5; i++) r_wr[i] <= n_wr[i];

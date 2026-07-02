@@ -47,6 +47,14 @@ int main(int argc, char** argv) {
     top->pm_in = pm;
     top->ps_in = ps;
 
+    // Tie off runtime loading/config ports — ROM params are baked in here.
+    top->ce = 1;
+    top->rom_wr = 0;
+    top->srom_wr = 0;
+    top->spd_wr = 0;
+    top->fx_wr = 0;
+    top->cfg_wr = 0;
+
     top->rst = 1;
     top->clk = 0;
     top->eval();

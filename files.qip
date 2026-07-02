@@ -1,4 +1,7 @@
+set_global_assignment -name SEARCH_PATH .
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ht943_core.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ht943_lcd.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ht943_audio.sv
 set_global_assignment -name VERILOG_FILE rtl/pll/pll.v
 set_global_assignment -name SDC_FILE HT943.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE HT943.sv
