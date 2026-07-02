@@ -168,11 +168,16 @@ wire  [3:0] core_spd_addr;
 wire  [3:0] core_fx_addr;
 wire  [7:0] core_rom_data, core_srom_data, core_spd_data, core_fx_data;
 
+// core_spd_wr/core_fx_wr are NOT driven here — they're the CONFIGURATION
+// section's per-profile sound-table sequence below, which continuously
+// `assign`s them. They used to also default-0 here (copy-pasted from
+// core_rom_wr/core_srom_wr, which this block does exclusively drive),
+// giving Quartus two drivers for one net — a real elaboration error
+// ("Can't resolve multiple constant drivers"), not caught by Verilator
+// (which is more permissive about this than Quartus is).
 always @(posedge clk_sys) begin
 	core_rom_wr  <= 0;
 	core_srom_wr <= 0;
-	core_spd_wr  <= 0;
-	core_fx_wr   <= 0;
 
 	if (ioctl_download & ioctl_wr) begin
 		case (ioctl_index)
