@@ -126,6 +126,12 @@ module ht943_core #(
     //     logic to the retire path.
     logic [15:0] rom16 [0:4095];
     (* ramstyle = "logic" *) logic [7:0] rom_b [0:4095];
+    // rom_wr streaming-write shift state (see the single rom16 write
+    // statement below): r_prev_byte shadows the previous streamed byte,
+    // r_byte0/r_wrap_pending/r_wrap_op carry byte 0 through to when byte
+    // 4095 arrives, to complete the wraparound entry rom16[4095].
+    logic [7:0] r_prev_byte, r_byte0, r_wrap_op;
+    logic       r_wrap_pending;
     initial begin
         if (ROM_HEX_FILE != "") begin
             logic [7:0] rom_init [0:4095];
@@ -559,21 +565,71 @@ module ht943_core #(
             if (n_ef)      w_next_cur_pc = 12'h008;
             else if (n_tf) w_next_cur_pc = 12'h004;
         end
+        // Folded in here (not as a separate branch on the r_rom16_q read
+        // itself, see below) so that read stays a single unconditional
+        // statement — Quartus's RAM inference declined rom16 as
+        // "asynchronous read logic" when the read alternated between two
+        // different read expressions (if(rst) rom16[12'h0] else
+        // rom16[w_next_cur_pc]); a plain always_ff reading one address
+        // expression is the canonical synchronous-read shape it wants.
+        if (rst) w_next_cur_pc = 12'h0;
+    end
+
+    // rom16's write request, computed combinationally and serviced by a
+    // single isolated always_ff below: r_prev_byte shadows the previous
+    // streamed byte, so each byte i (i>=1) completes
+    // rom16[i-1] = {byte[i], byte[i-1]} — EXCEPT byte 0, which can't
+    // complete anything yet (stashed in r_byte0), and byte 4095, whose
+    // wraparound completion (rom16[4095] = {byte[0], byte[4095]}) is
+    // deferred one cycle (r_wrap_pending) so it lands on a cycle with no
+    // ordinary rom_wr, keeping the two write reasons mutually exclusive.
+    // Relies on ioctl_download streaming bytes in strictly increasing
+    // address order (true for MiSTer core file loading).
+    logic        w_rom16_we;
+    logic [11:0] w_rom16_waddr;
+    logic [15:0] w_rom16_wdata;
+    always_comb begin
+        w_rom16_we    = 1'b0;
+        w_rom16_waddr = 12'h0;
+        w_rom16_wdata = 16'h0;
+        if (rom_wr && rom_addr != 12'h0) begin
+            w_rom16_we    = 1'b1;
+            w_rom16_waddr = rom_addr - 12'd1;
+            w_rom16_wdata = {rom_data, r_prev_byte};
+        end else if (!rom_wr && r_wrap_pending) begin
+            w_rom16_we    = 1'b1;
+            w_rom16_waddr = 12'hFFF;
+            w_rom16_wdata = {r_byte0, r_wrap_op};
+        end
+    end
+
+    // Isolated single-write-port always_ff — see the w_rom16_we comment
+    // above for why: Quartus's RAM-pattern matcher didn't recognize rom16
+    // as RAM-shaped at all when the write was just one more statement
+    // mixed into a big block alongside 20+ unrelated register updates; a
+    // small always_ff with one unconditional-enable write is the canonical
+    // shape RAM inference looks for.
+    always_ff @(posedge clk) begin
+        if (w_rom16_we) rom16[w_rom16_waddr] <= w_rom16_wdata;
     end
 
     always_ff @(posedge clk) begin
         // Memory writes happen at clk_sys speed regardless of ce (MiSTer
         // downloads run much faster than the emulated CPU clock).
-        // Each incoming byte updates its own rom_b entry plus the low byte
-        // of its own rom16 word and the high byte of the PRECEDING rom16
-        // word (rom16[i] = {byte[i+1], byte[i]}) — order-independent, so
-        // ioctl_download's natural increasing-address byte stream just
-        // works, wraparound (addr 0 <-> 4095) included via plain 12-bit
-        // subtraction.
+        // NOT gated by `rst`: MiSTer holds the core in reset for the
+        // WHOLE duration of a ROM download (see HT943.sv's download_reset),
+        // so rom_wr pulses happen entirely while rst=1 — gating this on
+        // !rst would silently discard every download.
         if (rom_wr) begin
-            rom_b[rom_addr]              <= rom_data;
-            rom16[rom_addr][7:0]         <= rom_data;
-            rom16[rom_addr - 12'd1][15:8] <= rom_data;
+            rom_b[rom_addr] <= rom_data;
+            r_prev_byte <= rom_data;
+            if (rom_addr == 12'h0) r_byte0 <= rom_data;
+            if (rom_addr == 12'hFFF) begin
+                r_wrap_pending <= 1'b1;
+                r_wrap_op      <= rom_data;
+            end
+        end else if (r_wrap_pending) begin
+            r_wrap_pending <= 1'b0;
         end
         if (srom_wr) sound_rom[srom_addr] <= srom_data;
         if (spd_wr)  speed_div[spd_addr]  <= spd_data;
@@ -626,7 +682,6 @@ module ht943_core #(
             // HT943._reset() zeroes the RAM too (not just registers) —
             // without this a mid-game reset would resume with stale VRAM.
             for (int i = 0; i < 256; i++) ram[i] <= 4'h0;
-            r_rom16_q <= rom16[12'h0];    // prefetch for PC=0, the first fetch after reset
         end else if (ce) begin
             r_pc <= n_pc;
             r_acc <= n_acc;
@@ -653,8 +708,18 @@ module ht943_core #(
             r_snd_tick_note <= n_snd_tick_note;
             r_snd_tick_fx <= n_snd_tick_fx;
             if (ram_we) ram[ram_waddr] <= ram_wdata;
-            r_rom16_q <= rom16[w_next_cur_pc];  // prefetch op/imm for the next instruction
         end
     end
+
+    // Kept in its own always_ff, isolated from the big state-commit block
+    // above (Quartus's RAM-pattern matcher didn't recognize rom16 as
+    // RAM-shaped at all when this read was mixed into that block alongside
+    // 20+ unrelated register updates and a reset for-loop), and NOT gated
+    // by ce/rst (that also broke recognition — see the w_next_cur_pc
+    // comment above for where rst's effect on the read address now lives
+    // instead). Unconditional re-reading is harmless: w_next_cur_pc is a
+    // pure function of architectural state that's frozen whenever ce=0, so
+    // this just keeps re-fetching the same already-correct address.
+    always_ff @(posedge clk) r_rom16_q <= rom16[w_next_cur_pc];
 
 endmodule
