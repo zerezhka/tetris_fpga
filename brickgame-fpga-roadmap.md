@@ -345,13 +345,13 @@ that's still verified separately by Phase 5's `sim/render_compare.py`.)
 
 #### Hardware bring-up TODO (as reported from live testing, 2026-07-04)
 
-- [ ] **Other 3 profiles: re-test after the CONF_STR fix.** Until 2026-07-04
-      the OSD profile selector was double-broken (O01 sat on the Reset status
-      bit; then the value list was ';'-separated so the option had a single
-      value) — every ROM ever tested on hardware actually ran with the E88
-      profile, which fully explains the "кривовато" rendering. With the fix
-      each profile still needs one honest hardware pass (timer/sound configs
-      and LCD maps are per-profile and each can be individually wrong).
+- [x] **Other 3 profiles work** (hardware-confirmed 2026-07-04 with the
+      CRC autodetect build: each ROM comes up with its own LCD face and
+      timings). Until that day the OSD profile selector was double-broken
+      (O01 sat on the Reset status bit; then the value list was
+      ';'-separated so the option had a single value) — every ROM ever
+      tested on hardware actually ran with the E88 profile, which fully
+      explained the "кривовато" rendering.
       NB for eyeball speed tests: E88↔SpaceIntruder differ by only 5%
       (1 MHz vs 950 kHz) — use KeychainPinBall (256 kHz, 4×) as the probe.
 - [x] **Install location / naming convention**: shipped as
@@ -385,8 +385,8 @@ Planned fixes, cheap-to-right:
       F-entries makes Main_MiSTer remember the last selected `.bin`/`.sro`
       and auto-reload them on every core start. One char per entry in
       CONF_STR, no core logic.
-- [x] **Profile autodetect from ROM content** (RTL done 2026-07-04, pending
-      hardware verify): the wrapper CRC32s the .bin during ioctl download
+- [x] **Profile autodetect from ROM content** (hardware-verified
+      2026-07-04): the wrapper CRC32s the .bin during ioctl download
       and matches `PROFILE_ROM_CRC32` (generated from the real dumps);
       timings, wakeup masks, LCD map and sound config all follow the ROM
       with zero user action. OSD selector is now "Auto / force E88 / ..."
