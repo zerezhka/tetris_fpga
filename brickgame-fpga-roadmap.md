@@ -551,6 +551,13 @@ Toolchain reality check:
   running this repo's core/emulator — at which point the HT943 is the
   cartridge format, not the silicon. 10 cols × 3 px + 20 rows × 3 px =
   30×60 of the 128×64 panel, so the well fits with room for score/next.
+- **Cheapest physical build: Pi Pico (~$4, clones ~$2) + ST7565 + buttons
+  ≈ $10 total.** A software HT943 interpreter on a 133 MHz dual-core ARM
+  is a few-percent load (the chip retires ~1 MHz / 4-8 osc cycles per
+  instruction); core 0 emulates, core 1 drives SPI LCD + sound. Language:
+  Zig (per taste — microzig targets RP2040); the emulator keeps original
+  .bin dumps, incl. a future homebrew tetris, as the "cartridge format".
+  Loses only cycle-level hardware honesty vs FPGA — invisible at 1 MHz.
 
 ---
 
