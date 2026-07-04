@@ -50,3 +50,21 @@ set_multicycle_path -setup -end 8 \
 set_multicycle_path -hold -end 7 \
     -from [get_registers {*|ht943_core:ht943_core|*}] \
     -to   [get_registers {*|ht943_core:ht943_core|*}]
+
+# EXCEPTION (later assignment wins on overlapping paths): the ROM-download
+# byte-shift registers are clk_sys-paced, NOT ce-paced — ioctl bytes from
+# the HPS can arrive with only a few clk_sys between them, so paths
+# launched from these registers (into the rom16 write ports) must close
+# single-cycle. The blanket 8-cycle relax above let the Fitter legally
+# make them ~160ns slow, silently corrupting the streamed ROM on real
+# hardware (sim never sees it: Verilator has no propagation delays).
+set_multicycle_path -setup -end 1 \
+    -from [get_registers {*|ht943_core:ht943_core|r_prev_byte* \
+                          *|ht943_core:ht943_core|r_byte0* \
+                          *|ht943_core:ht943_core|r_wrap_op* \
+                          *|ht943_core:ht943_core|r_wrap_pending}]
+set_multicycle_path -hold -end 0 \
+    -from [get_registers {*|ht943_core:ht943_core|r_prev_byte* \
+                          *|ht943_core:ht943_core|r_byte0* \
+                          *|ht943_core:ht943_core|r_wrap_op* \
+                          *|ht943_core:ht943_core|r_wrap_pending}]
