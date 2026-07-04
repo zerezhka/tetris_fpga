@@ -32,6 +32,7 @@ regenerated" drift.
 
 Usage: python3 sim/test_lcd_assets.py   (exit 1 on any failure)
 """
+import json
 import os
 import sys
 
@@ -111,6 +112,18 @@ def check_face(name):
             if 2 * (tx + gx) >= w or 2 * (ty + gy) >= h:
                 errors.append(f'brick segment {i}: metrics ({tx},{ty},'
                               f'{gx},{gy}) leave no fill in {w}x{h}')
+    meta_path = os.path.join(ROOT, 'rtl', 'assets', f'{name}_meta.json')
+    with open(meta_path) as f:
+        frame = json.load(f).get('frame')
+    if frame is not None:
+        x0, y0, x1, y1 = frame
+        if not (0 <= x0 < x1 <= HW and 0 <= y0 < y1 <= HH):
+            errors.append(f'well frame {frame} outside {HW}x{HH} raster')
+        if x1 - x0 < 2 * 3 or y1 - y0 < 2 * 3:
+            errors.append(f'well frame {frame} too thin for a 3px line')
+    if frame is None and nbricks > 50:
+        errors.append(f'{nbricks} bricks but no well frame detected')
+
     return errors, nsegs, nbricks
 
 

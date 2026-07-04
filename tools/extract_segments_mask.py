@@ -148,6 +148,72 @@ def brick_signature(own, bbox):
     return (min(15, tx), min(15, ty), min(15, gx), min(15, gy))
 
 
+def find_well_frame(bboxes, well_candidates, all_bboxes, hw, hh, thickness=3):
+    """Compute the printed-bezel frame rectangle around the playfield well.
+
+    Real Brick Game faceplates separate the 10x20 well from the score/NEXT
+    side panel with a printed frame; the SVG faces don't carry it (it's
+    housing art, not an LCD segment), so it is reconstructed here from the
+    brick grid itself. `well_candidates` is the LARGEST size cluster of
+    bricks (the playfield cells — NEXT cells are a different, smaller
+    cluster and would otherwise drag the frame over the side panel, as
+    happened on Keychain55in1). Candidates are then clustered into columns
+    by center-x, and only columns with (near-)full height — the well
+    proper — count.
+
+    Returns the frame's OUTER rect (x0, y0, x1, y1), thickness `thickness`,
+    placed in the gap just outside the well, pushed further out until the
+    ring stops intersecting any non-well segment bbox (clamped to the
+    canvas). None when the face has no brick well at all.
+    """
+    idxs = list(well_candidates)
+    if not idxs:
+        return None
+    cols = {}
+    for i in idxs:
+        x, y, w, h = bboxes[i]
+        cxc = x + w // 2
+        for k in cols:
+            if abs(k - cxc) <= w // 2:
+                cols[k].append(i)
+                break
+        else:
+            cols[cxc] = [i]
+    maxn = max(len(v) for v in cols.values())
+    well = [i for v in cols.values() if len(v) >= max(2, maxn * 3 // 5)
+            for i in v]
+    if not well:
+        return None
+    wx0 = min(bboxes[i][0] for i in well)
+    wy0 = min(bboxes[i][1] for i in well)
+    wx1 = max(bboxes[i][0] + bboxes[i][2] for i in well)
+    wy1 = max(bboxes[i][1] + bboxes[i][3] for i in well)
+    others = [all_bboxes[i] for i in range(len(all_bboxes)) if i not in set(well)]
+
+    def collides(rect):
+        x0, y0, x1, y1 = rect
+        ix0, iy0 = x0 + thickness, y0 + thickness
+        ix1, iy1 = x1 - thickness, y1 - thickness
+        for bx, by, bw, bh in others:
+            if bx < x1 and bx + bw > x0 and by < y1 and by + bh > y0:
+                # overlaps the outer rect; ignore if fully inside the hole
+                if not (bx >= ix0 and by >= iy0 and
+                        bx + bw <= ix1 and by + bh <= iy1):
+                    return True
+        return False
+
+    for off in range(2, 16):
+        x0 = max(0, wx0 - off - thickness)
+        y0 = max(0, wy0 - off - thickness)
+        x1 = min(hw, wx1 + off + thickness)
+        y1 = min(hh, wy1 + off + thickness)
+        if not collides((x0, y0, x1, y1)):
+            return (x0, y0, x1, y1)
+    # No collision-free placement: hug the well as closely as possible.
+    return (max(0, wx0 - 2 - thickness), max(0, wy0 - 2 - thickness),
+            min(hw, wx1 + 2 + thickness), min(hh, wy1 + 2 + thickness))
+
+
 def extract(svg_path, outprefix, cw=120, ch=280, scale=3):
     tree = ET.parse(svg_path)
     root = tree.getroot()
@@ -427,10 +493,18 @@ def extract(svg_path, outprefix, cw=120, ch=280, scale=3):
                    | (tx << 12) | (ty << 8) | (gx << 4) | gy
             f.write(f'{word:014X}\n')
 
+    # Well candidates = the biggest size cluster (uniformized above, and
+    # immune to stamping demotions: a demoted cell still sits in the well).
+    well_candidates = max((c[1] for c in clusters), key=len) if clusters else []
+    frame = find_well_frame(bboxes, well_candidates, bboxes, hw, hh)
+    if frame:
+        print(f'well frame: {frame}', file=sys.stderr)
+
     with open(f'{outprefix}_meta.json', 'w') as f:
         json.dump({'n_segments': len(segs), 'n_bricks': n_brick,
                    'clusters': [{'w': c[0][0], 'h': c[0][1],
                                  'n': len(c[1])} for c in clusters],
+                   'frame': list(frame) if frame else None,
                    'scale': scale}, f, indent=1)
 
     non_bg = sum(1 for y in range(ch) for x in range(cw)

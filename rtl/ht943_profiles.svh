@@ -12,6 +12,15 @@ localparam logic [15:0] PROFILE_SOUND_FREQ_DIV[4] = '{64, 32, 32, 64};
 // compares the streamed .bin's CRC against these on "Auto".
 localparam logic [31:0] PROFILE_ROM_CRC32[4] = '{32'hF9CE0A69, 32'h85A44494, 32'hC8623CF2, 32'hE96D16C9};
 
+// Well frame (printed-bezel line around the playfield, outer rect
+// in 360x840 raster coords, drawn 3px thick by ht943_lcd) —
+// computed by extract_segments_mask.py from the brick grid.
+// X0==X1 means the face has no brick well: frame disabled.
+localparam logic [8:0] PROFILE_FRAME_X0[4] = '{0, 0, 0, 0};
+localparam logic [9:0] PROFILE_FRAME_Y0[4] = '{98, 0, 171, 0};
+localparam logic [8:0] PROFILE_FRAME_X1[4] = '{234, 0, 360, 0};
+localparam logic [9:0] PROFILE_FRAME_Y1[4] = '{840, 0, 840, 0};
+
 localparam logic [3:0] PROFILE_PP_WAKEUP[4] = '{0, 0, 0, 2};
 localparam logic [3:0] PROFILE_PM_WAKEUP[4] = '{0, 0, 0, 0};
 localparam logic [3:0] PROFILE_PS_WAKEUP[4] = '{4, 1, 1, 0};
@@ -24,10 +33,4 @@ localparam logic [11:0] PROFILE_PS_JMAP[4][4] = '{'{32, 64, 128, 0}, '{160, 64, 
 
 localparam logic [7:0] PROFILE_SPD[4][16] = '{'{7, 41, 103, 31, 63, 63, 109, 31, 123, 119, 1, 37, 17, 114, 11, 11}, '{29, 125, 59, 17, 83, 60, 37, 100, 127, 117, 127, 127, 54, 14, 91, 127}, '{7, 41, 103, 31, 63, 63, 41, 31, 123, 84, 1, 37, 17, 10, 11, 11}, '{92, 32, 32, 1, 76, 76, 41, 41, 7, 1, 1, 1, 1, 1, 1, 1}};
 localparam logic [7:0] PROFILE_FX[4][16] = '{'{0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0}, '{0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 7, 7, 0, 0, 0, 7}, '{0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0}, '{0, 0, 0, 6, 0, 1, 1, 1, 0, 7, 7, 7, 7, 7, 7, 7}};
-
-// Brick frame/gap in hi-res pixels, per profile (x = horizontal, y = vertical).
-localparam logic [3:0] PROFILE_BRICK_TX[4] = '{2, 2, 5, 3};
-localparam logic [3:0] PROFILE_BRICK_TY[4] = '{4, 3, 6, 4};
-localparam logic [3:0] PROFILE_BRICK_GX[4] = '{2, 2, 5, 3};
-localparam logic [3:0] PROFILE_BRICK_GY[4] = '{4, 3, 6, 4};
 

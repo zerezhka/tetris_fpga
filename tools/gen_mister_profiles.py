@@ -132,6 +132,15 @@ def emit_svh(profiles, out_path):
         '// compares the streamed .bin\'s CRC against these on "Auto".',
         f'localparam logic [31:0] PROFILE_ROM_CRC32[{n}] = \'{{{", ".join(f"32\'h{p['rom_crc']:08X}" for p in profiles)}}};',
         '',
+        '// Well frame (printed-bezel line around the playfield, outer rect',
+        '// in 360x840 raster coords, drawn 3px thick by ht943_lcd) —',
+        '// computed by extract_segments_mask.py from the brick grid.',
+        '// X0==X1 means the face has no brick well: frame disabled.',
+        f'localparam logic [8:0] PROFILE_FRAME_X0[{n}] = \'{{{", ".join(str(p["frame"][0]) for p in profiles)}}};',
+        f'localparam logic [9:0] PROFILE_FRAME_Y0[{n}] = \'{{{", ".join(str(p["frame"][1]) for p in profiles)}}};',
+        f'localparam logic [8:0] PROFILE_FRAME_X1[{n}] = \'{{{", ".join(str(p["frame"][2]) for p in profiles)}}};',
+        f'localparam logic [9:0] PROFILE_FRAME_Y1[{n}] = \'{{{", ".join(str(p["frame"][3]) for p in profiles)}}};',
+        '',
     ]
     # Port pullup values aren't generated here: nothing on the RTL side
     # ever consumes them at runtime (see ht943_core.sv's comment on why
@@ -182,6 +191,11 @@ def gen_segment_maps(profiles):
 def main():
     profiles = [build_profile(name) for name in PROFILES]
     gen_segment_maps(profiles)
+    # The well-frame rect comes out of the segment-map extraction, so it
+    # can only be read back after gen_segment_maps has run.
+    for p in profiles:
+        with open(os.path.join(ASSETS_OUT, f'{p["name"]}_meta.json')) as f:
+            p['frame'] = json.load(f).get('frame') or [0, 0, 0, 0]
     emit_svh(profiles, os.path.join(ROOT, 'rtl', 'ht943_profiles.svh'))
     print(f'Wrote rtl/ht943_profiles.svh and {len(profiles)} segment maps to rtl/assets/',
           file=sys.stderr)

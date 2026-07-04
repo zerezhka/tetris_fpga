@@ -56,6 +56,10 @@ module ht943_lcd #(
     output logic        ce_pix
 );
 
+    // Per-profile well-frame rects (PROFILE_FRAME_*) live in the shared
+    // profiles header; the rest of its localparams are unused here.
+    `include "rtl/ht943_profiles.svh"
+
     // 360x840 visible @ ~59.5Hz. 480*875*59.52 = 25 MHz = clk_sys/2
     // exactly (the previous 120x280 raster used the same trick with /18).
     localparam HTOTAL = 480;
@@ -251,12 +255,30 @@ module ht943_lcd #(
                     (dx < wmt - {6'd0, bgx}) && (dy < hmt - {6'd0, bgy});
     wire brick_dark = in_bbox && (in_frame || in_inner);
 
+    // Well frame: the printed line a real faceplate draws between the
+    // playfield and the score/NEXT panel. Not an LCD segment — always
+    // dark, independent of RAM state. Rect comes from the generator
+    // (outer edge; the line is FT thick, i.e. outer minus inner).
+    // X0==X1 disables it (faces without a brick well).
+    localparam int FT = 3;
+    wire [8:0] fr_x0 = PROFILE_FRAME_X0[profile];
+    wire [9:0] fr_y0 = PROFILE_FRAME_Y0[profile];
+    wire [8:0] fr_x1 = PROFILE_FRAME_X1[profile];
+    wire [9:0] fr_y1 = PROFILE_FRAME_Y1[profile];
+    wire fr_outer = (hx2 >= fr_x0) && (hx2 < fr_x1) &&
+                    (hy2 >= fr_y0) && (hy2 < fr_y1);
+    wire fr_inner = ({1'b0, hx2} >= {1'b0, fr_x0} + FT) &&
+                    ({1'b0, hx2} <  {1'b0, fr_x1} - FT) &&
+                    ({1'b0, hy2} >= {1'b0, fr_y0} + FT) &&
+                    ({1'b0, hy2} <  {1'b0, fr_y1} - FT);
+    wire frame_hit = (fr_x0 != fr_x1) && fr_outer && !fr_inner;
+
     // Registered: the S2 outputs (and the combinational RAM read + bbox
     // math on them) are valid 2 cycles after S0; registering here makes
     // the data path a uniform 3 cycles, matching the d_*[2] geometry taps.
     reg dark;
     always @(posedge clk)
-        dark <= lit_state && (geo_brick ? brick_dark : 1'b1);
+        dark <= frame_hit || (lit_state && (geo_brick ? brick_dark : 1'b1));
 
     // ---- output stage: geometry delayed 3 cycles to match the data ----
     reg [2:0] d_hsync, d_vsync, d_hblank, d_vblank, d_active, d_ce;
