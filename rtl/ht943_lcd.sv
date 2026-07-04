@@ -6,7 +6,11 @@
 // segments with id="{ramByte}_{ramBit}"; tools/gen_mister_profiles.py
 // point-samples that SVG (via tools/extract_segments_mask.py) into a
 // per-pixel map at this module's raster resolution — one 10-bit word per
-// pixel, {ramByte[7:0], ramBit[1:0]}, or 10'h3FF for "not a segment"
+// pixel, {ramByte[7:0], ramBit[1:0]} in bits [9:0], or bit 10 set for
+// "not a segment". Background must be OUT-OF-BAND: all 1024 10-bit codes
+// are legal descriptors (0x3FF IS segment 255_3 — SpaceIntruder's player
+// ship among others), so an in-band 0x3FF sentinel permanently blanked
+// those segments on hardware.
 // (plastic housing / background) — and writes it to rtl/assets/*_pix.hex.
 //
 // Scanout reads that pixel map (1-cycle registered BRAM read) to find
@@ -98,10 +102,10 @@ module ht943_lcd #(
 
     // ---- segment pixel maps: one 33600-word ROM per profile ----
     localparam int PIX_WORDS = H_VISIBLE * V_VISIBLE;
-    logic [9:0] pixmap0 [0:PIX_WORDS-1];
-    logic [9:0] pixmap1 [0:PIX_WORDS-1];
-    logic [9:0] pixmap2 [0:PIX_WORDS-1];
-    logic [9:0] pixmap3 [0:PIX_WORDS-1];
+    logic [10:0] pixmap0 [0:PIX_WORDS-1];
+    logic [10:0] pixmap1 [0:PIX_WORDS-1];
+    logic [10:0] pixmap2 [0:PIX_WORDS-1];
+    logic [10:0] pixmap3 [0:PIX_WORDS-1];
     initial begin
         $readmemh("rtl/assets/E88_8in1_pix.hex", pixmap0);
         $readmemh("rtl/assets/KeychainPinBall_pix.hex", pixmap1);
@@ -117,7 +121,7 @@ module ht943_lcd #(
     // (d_active gates it below), so which safe value doesn't matter.
     wire [15:0] pix_idx = active_raw ? (16'(v_count) * H_VISIBLE + 16'(h_count)) : 16'd0;
 
-    logic [9:0] pw0, pw1, pw2, pw3;
+    logic [10:0] pw0, pw1, pw2, pw3;
     always @(posedge clk) begin
         pw0 <= pixmap0[pix_idx];
         pw1 <= pixmap1[pix_idx];
@@ -125,10 +129,10 @@ module ht943_lcd #(
         pw3 <= pixmap3[pix_idx];
     end
 
-    wire [9:0] pix_word = (profile == 2'd0) ? pw0 :
+    wire [10:0] pix_word = (profile == 2'd0) ? pw0 :
                           (profile == 2'd1) ? pw1 :
                           (profile == 2'd2) ? pw2 : pw3;
-    wire       is_bg    = (pix_word == 10'h3FF);
+    wire       is_bg    = pix_word[10];
     wire [7:0] seg_byte = pix_word[9:2];
     wire [1:0] seg_bit  = pix_word[1:0];
 

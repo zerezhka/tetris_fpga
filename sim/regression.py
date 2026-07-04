@@ -133,8 +133,18 @@ def fixture_case(name, n, presses=()):
     return diff(ref, rtl)
 
 
+def lcd_assets_case():
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, 'sim', 'test_lcd_assets.py')],
+                       capture_output=True, text=True)
+    return r.returncode == 0, r.stdout + r.stderr
+
+
 CASES = [
     # (label, thunk)
+    # Static LCD pixel-map asset validation (segment coverage, palette
+    # injectivity, sentinel encoding) — see sim/test_lcd_assets.py.
+    ('LCD pixel-map assets (all 4 profiles)', lcd_assets_case),
     ('E23PlusMarkII96in1 (fetch/decode/execute)', lambda: real_rom_case('E23PlusMarkII96in1')),
     ('E88_8in1 (fetch/decode/execute)', lambda: real_rom_case('E88_8in1')),
     ('GA888 (fetch/decode/execute)', lambda: real_rom_case('GA888')),

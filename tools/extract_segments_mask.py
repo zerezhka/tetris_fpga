@@ -10,7 +10,13 @@ reads back which segment owns each pixel. It emits:
   - <outprefix>_seg.hex : one "byte bit" pair per segment (index 0..N-1)
   - <outprefix>_pix.hex : per-pixel descriptor in row-major order.
                           Each value is {byte[7:0], bit[1:0]} packed into
-                          10 bits, or 0x3FF for background.
+                          bits [9:0], or 0x400 (bit 10 set) for background.
+                          Background needs the 11th bit: all 1024 10-bit
+                          codes are legal segment descriptors — 0x3FF IS
+                          segment (255,3), which E88/SpaceIntruder & co
+                          really use (SpaceIntruder's is the player ship),
+                          and an in-band 0x3FF sentinel silently made
+                          those segments permanently background.
 
 The RTL LCD rasterizer loads the pixel map and lights a pixel when the
 segment that owns it has its RAM bit set.
@@ -182,7 +188,10 @@ def extract(svg_path, outprefix, tw=120, th=280):
     # Build color -> index lookup.
     color_to_idx = {color_to_rgb(index_to_color(idx)): idx for idx in range(len(segs))}
 
-    pixel_owner = [[0x3FF] * tw for _ in range(th)]
+    BG = 0x400  # bit 10 = background; bits [9:0] = {byte, bit} descriptor
+
+    pixel_owner = [[BG] * tw for _ in range(th)]
+    seen_idx = set()
     for y in range(th):
         for x in range(tw):
             rgb = img.pixel(x * SS + SS // 2, y * SS + SS // 2) & 0xFFFFFF
@@ -190,6 +199,34 @@ def extract(svg_path, outprefix, tw=120, th=280):
             if idx is not None:
                 byte, bit = segs[idx]
                 pixel_owner[y][x] = (byte << 2) | (bit & 3)
+                seen_idx.add(idx)
+
+    # Rescue pass: a segment thin enough to slip between pixel-center
+    # samples (SpaceIntruder has one) would otherwise vanish from the map
+    # entirely. For each such segment, scan every pixel's full SSxSS
+    # oversampled block and claim the first still-background pixel that
+    # contains any of the segment's color.
+    lost = [i for i in range(len(segs)) if i not in seen_idx]
+    for idx in lost:
+        want = color_to_rgb(index_to_color(idx))
+        found = False
+        for y in range(th):
+            if found:
+                break
+            for x in range(tw):
+                if pixel_owner[y][x] != BG:
+                    continue
+                block_has = any(
+                    (img.pixel(x * SS + sx, y * SS + sy) & 0xFFFFFF) == want
+                    for sy in range(SS) for sx in range(SS))
+                if block_has:
+                    byte, bit = segs[idx]
+                    pixel_owner[y][x] = (byte << 2) | (bit & 3)
+                    found = True
+                    break
+        if not found:
+            print(f'WARNING: segment {seg_ids[idx]} has no pixels even in '
+                  f'the oversampled render', file=sys.stderr)
 
     seg_path = f'{outprefix}_seg.hex'
     pix_path = f'{outprefix}_pix.hex'
@@ -203,7 +240,7 @@ def extract(svg_path, outprefix, tw=120, th=280):
             for x in range(tw):
                 f.write(f'{pixel_owner[y][x]:03X}\n')
 
-    non_bg = sum(1 for y in range(th) for x in range(tw) if pixel_owner[y][x] != 0x3FF)
+    non_bg = sum(1 for y in range(th) for x in range(tw) if pixel_owner[y][x] != BG)
     print(f'Wrote {len(segs)} segments to {seg_path}', file=sys.stderr)
     print(f'Wrote {tw}x{th} pixel map to {pix_path} ({non_bg} non-bg pixels)',
           file=sys.stderr)
