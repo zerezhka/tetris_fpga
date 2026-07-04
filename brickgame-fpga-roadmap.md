@@ -558,6 +558,18 @@ Toolchain reality check:
   Zig (per taste — microzig targets RP2040); the emulator keeps original
   .bin dumps, incl. a future homebrew tetris, as the "cartridge format".
   Loses only cycle-level hardware honesty vs FPGA — invisible at 1 MHz.
+- **Power budget** (the one thing the original does 1000× better: Holtek
+  + static-drive reflective segment glass ≈ tens of µA ≈ a year on 2×AA):
+  stock Pico ≈ 20-30 mA → days, not months. Mitigations, in order:
+  ST7565 is also reflective FSTN (~0.1-0.5 mA, no backlight — the screen
+  is NOT the problem); underclock+undervolt the RP2040 to ~10-20 MHz
+  sysclk (emulating a 1 MHz toy needs ~nothing) → low single-digit mA;
+  mirror the emulated HALT into DORMANT (~180 µA). Realistic ~2-5 mA,
+  and with a thin flat power-bank li-po cell (thousands of mAh, on hand)
+  that's months of casual play. The true spiritual successor would be an
+  MSP430/STM32L with a built-in segment-LCD controller driving glass
+  salvaged from a real brick game at µA — but Zig support there is
+  exotic, and the panel is second-hand-only.
 
 ---
 
