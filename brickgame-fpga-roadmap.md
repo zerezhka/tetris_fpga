@@ -385,14 +385,15 @@ Planned fixes, cheap-to-right:
       F-entries makes Main_MiSTer remember the last selected `.bin`/`.sro`
       and auto-reload them on every core start. One char per entry in
       CONF_STR, no core logic.
-- [ ] **Profile autodetect from ROM content**: all 4 supported ROMs are
-      known dumps — during ioctl download, hash the 4096 bytes (or compare
-      a few signature bytes at fixed addresses) and set the profile
-      automatically; timings, wakeup masks, LCD map and sound config then
-      all follow the ROM with zero user action. Keep the OSD selector as
-      "Auto / force E88 / ..." override for unknown dumps. This kills the
-      whole "loaded with the wrong profile → garbage picture that looks
-      like a hang" failure class.
+- [x] **Profile autodetect from ROM content** (RTL done 2026-07-04, pending
+      hardware verify): the wrapper CRC32s the .bin during ioctl download
+      and matches `PROFILE_ROM_CRC32` (generated from the real dumps);
+      timings, wakeup masks, LCD map and sound config all follow the ROM
+      with zero user action. OSD selector is now "Auto / force E88 / ..."
+      (O68, 3 bits); unknown dumps fall back to E88. crc32_byte verified
+      bit-exact vs zlib.crc32 (Verilator harness); sim/test_rom_crc.py
+      pins the table to the ROM files. This kills the whole "loaded with
+      the wrong profile → garbage picture that looks like a hang" class.
 - [ ] **Sound ROM auto-load**: a core cannot ask the HPS for a companion
       file (file transfers are strictly user-initiated), so ".sro if
       present" is impossible directly. The MiSTer-native answer is
