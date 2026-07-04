@@ -192,11 +192,28 @@ def extract(svg_path, outprefix, tw=120, th=280):
 
     pixel_owner = [[BG] * tw for _ in range(th)]
     seen_idx = set()
+    # Coverage sampling, not center-point sampling: each target pixel is
+    # owned by the segment covering the most of its SSxSS oversampled
+    # block (if it covers at least ~1/4 of it). Center-point sampling made
+    # every ~1px-thick SVG feature (the brick outlines) flicker in and out
+    # depending on sub-pixel phase — bricks came out with visibly
+    # different shapes ("each cube drawn by a different artist" on real
+    # hardware). Majority-of-block ownership quantizes every brick the
+    # same way.
+    min_cover = (SS * SS) // 4
     for y in range(th):
         for x in range(tw):
-            rgb = img.pixel(x * SS + SS // 2, y * SS + SS // 2) & 0xFFFFFF
-            idx = color_to_idx.get(rgb)
-            if idx is not None:
+            counts = {}
+            for sy in range(SS):
+                for sx in range(SS):
+                    rgb = img.pixel(x * SS + sx, y * SS + sy) & 0xFFFFFF
+                    idx = color_to_idx.get(rgb)
+                    if idx is not None:
+                        counts[idx] = counts.get(idx, 0) + 1
+            if not counts:
+                continue
+            idx, cover = max(counts.items(), key=lambda kv: kv[1])
+            if cover >= min_cover:
                 byte, bit = segs[idx]
                 pixel_owner[y][x] = (byte << 2) | (bit & 3)
                 seen_idx.add(idx)
