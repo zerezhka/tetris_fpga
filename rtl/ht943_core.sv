@@ -102,7 +102,16 @@ module ht943_core #(
     // effect bit.
     output logic        snd_tick,
     output logic [7:0]  snd_tick_note,
-    output logic        snd_tick_fx
+    output logic        snd_tick_fx,
+
+    // Oscillator cycles the instruction currently at `pc` will take
+    // (combinational, valid through the whole execute window). The MiSTer
+    // wrapper paces ce with this: one instruction retires every
+    // `cycles` osc ticks, exactly how BrickEmuPy's emulator loop spends
+    // clock()'s return value against the configured oscillator rate.
+    // Trace testbenches ignore it (they compare per-instruction, where
+    // real-time pacing is invisible).
+    output logic [3:0]  cycles
 );
 
     // Program ROM, stored TWICE:
@@ -257,6 +266,7 @@ module ht943_core #(
     assign ef   = r_ef;
     assign halt = r_halt;
     assign opcode = r_halt ? 8'hFF : op;
+    assign cycles = ex_cycles;
     assign dbg_ram_data = ram[dbg_ram_addr];
 
     assign snd_on      = r_snd_on;

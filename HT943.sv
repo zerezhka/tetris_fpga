@@ -126,6 +126,7 @@ pll pll
 reg [7:0] cpu_ce_div;
 reg       cpu_ce;
 reg [7:0] cpu_ce_target;
+wire [3:0] cpu_cycles; // per-instruction osc-cycle count from the core
 
 always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[status[1:0]][7:0];
 
@@ -137,16 +138,35 @@ always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[status[1:0]][7:0];
 // The core's rom16 prefetch is primed during rst (not ce) specifically so
 // holding ce off here is safe — see the r_rom16_q read enable in
 // ht943_core.sv.
+//
+// Two-level pacing: cpu_ce_div divides clk_sys down to the emulated
+// oscillator (PROFILE_CLK_DIV), and cpu_cycles_left then counts the
+// per-instruction execution cycles the core reports (cpu_cycles, 4 or 8
+// osc ticks per opcode). Firing ce at the bare oscillator rate — one
+// instruction per osc tick — ran everything ~4-8x too fast on first
+// hardware bring-up: BrickEmuPy paces its clock() calls by their
+// returned cycle counts against the oscillator, and the core's own
+// timer arithmetic (r_timer_cnt -= ex_cycles) assumes the same.
+// cpu_cycles is sampled on the retiring ce edge (it combinationally
+// describes the instruction being retired), pacing the gap that
+// FOLLOWS each instruction by its own duration — a one-instruction
+// phase shift versus pacing the gap before it, invisible in practice.
+reg [3:0] cpu_cycles_left;
 always @(posedge clk_sys) begin
+	cpu_ce <= 0;
 	if (reset || cfg_active) begin
 		cpu_ce_div <= 0;
-		cpu_ce <= 0;
+		cpu_cycles_left <= 4'd1;
 	end else if (cpu_ce_div >= cpu_ce_target) begin
 		cpu_ce_div <= 0;
-		cpu_ce <= 1;
+		if (cpu_cycles_left <= 4'd1) begin
+			cpu_ce <= 1;
+			cpu_cycles_left <= (cpu_cycles == 0) ? 4'd1 : cpu_cycles;
+		end else begin
+			cpu_cycles_left <= cpu_cycles_left - 1'd1;
+		end
 	end else begin
 		cpu_ce_div <= cpu_ce_div + 1'd1;
-		cpu_ce <= 0;
 	end
 end
 
@@ -492,7 +512,9 @@ ht943_core ht943_core
 	// cpu_snd_fx, the same wire snd_fx (a different core output) already
 	// drives a few lines up — two module outputs driving one net, which
 	// doesn't elaborate.
-	.snd_tick_fx()
+	.snd_tick_fx(),
+
+	.cycles(cpu_cycles)
 );
 
 ///////////////////////   LED   //////////////////////////////////
