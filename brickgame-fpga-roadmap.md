@@ -560,9 +560,11 @@ Toolchain reality check:
   Loses only cycle-level hardware honesty vs FPGA — invisible at 1 MHz.
 - **Parts list (2026-07-04, partly on hand)**: Pi Pico ✅, thin
   high-capacity power-bank li-po cell ✅. To source: ST7565 128×64
-  module; 5× MX-style switches on hotswap sockets for the game cluster
-  (left/right/down + A/B rotate CW/CCW, Game-Boy-tetris-style — the
-  original brick game only rotated one way; hotswap is the point:
+  module; 6× MX-style switches on hotswap sockets for the game cluster
+  (full d-pad up/left/right/down + A/B rotate CW/CCW, Game-Boy-tetris-
+  style — the original brick game only rotated one way; Up doubles as
+  hard-drop/rotate depending on game, and non-tetris ROMs in the x-in-1
+  collections use it as a real direction anyway; hotswap is the point:
   sockets are standalone Kailh/Gateron parts you solder to the PCB,
   switches just clip in; NB Kailh Choc has its own hotswap sockets too
   if the MX stack height proves too thick for the flat cell); 3× cheap
