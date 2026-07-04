@@ -129,8 +129,19 @@ reg [7:0] cpu_ce_target;
 
 always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[status[1:0]][7:0];
 
+// ce is suppressed during reset AND the 39-cycle profile-config load that
+// follows it (cfg_active below): cpu_ce_div free-ran through reset before,
+// so the first post-reset ce could fire anywhere 0..target cycles in —
+// including BEFORE the config sequence finished, letting the first
+// instructions execute with a half-written timer_div/wakeup/sound config.
+// The core's rom16 prefetch is primed during rst (not ce) specifically so
+// holding ce off here is safe — see the r_rom16_q read enable in
+// ht943_core.sv.
 always @(posedge clk_sys) begin
-	if (cpu_ce_div >= cpu_ce_target) begin
+	if (reset || cfg_active) begin
+		cpu_ce_div <= 0;
+		cpu_ce <= 0;
+	end else if (cpu_ce_div >= cpu_ce_target) begin
 		cpu_ce_div <= 0;
 		cpu_ce <= 1;
 	end else begin

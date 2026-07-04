@@ -790,16 +790,21 @@ module ht943_core #(
     // clock-enable on a synchronous read still maps to the M10K's
     // native rden, so RAM inference survives (unlike the earlier
     // ce/rst-gated *two-expression* read shape, which didn't).
+    // Enable is `ce || rst`, not bare `ce`: the MiSTer wrapper suppresses
+    // ce during reset + profile-config loading (see HT943.sv's cpu_ce),
+    // so rst-time reads are the only thing priming the prefetch with
+    // ROM[0] before the first post-reset ce edge executes it. An OR'd
+    // clock-enable still maps to the M10K's native rden.
     logic [1:0] r_rom16_q0, r_rom16_q1, r_rom16_q2, r_rom16_q3,
                 r_rom16_q4, r_rom16_q5, r_rom16_q6, r_rom16_q7;
-    always_ff @(posedge clk) if (ce) r_rom16_q0 <= rom16_b0[w_next_cur_pc];
-    always_ff @(posedge clk) if (ce) r_rom16_q1 <= rom16_b1[w_next_cur_pc];
-    always_ff @(posedge clk) if (ce) r_rom16_q2 <= rom16_b2[w_next_cur_pc];
-    always_ff @(posedge clk) if (ce) r_rom16_q3 <= rom16_b3[w_next_cur_pc];
-    always_ff @(posedge clk) if (ce) r_rom16_q4 <= rom16_b4[w_next_cur_pc];
-    always_ff @(posedge clk) if (ce) r_rom16_q5 <= rom16_b5[w_next_cur_pc];
-    always_ff @(posedge clk) if (ce) r_rom16_q6 <= rom16_b6[w_next_cur_pc];
-    always_ff @(posedge clk) if (ce) r_rom16_q7 <= rom16_b7[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q0 <= rom16_b0[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q1 <= rom16_b1[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q2 <= rom16_b2[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q3 <= rom16_b3[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q4 <= rom16_b4[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q5 <= rom16_b5[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q6 <= rom16_b6[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce || rst) r_rom16_q7 <= rom16_b7[w_next_cur_pc];
     assign r_rom16_q = {r_rom16_q7, r_rom16_q6, r_rom16_q5, r_rom16_q4,
                          r_rom16_q3, r_rom16_q2, r_rom16_q1, r_rom16_q0};
 
