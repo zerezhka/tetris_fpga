@@ -149,6 +149,10 @@ CASES = [
     # collisions, value separators, extension chunking) — both hardware-only
     # OSD bugs to date were CONF_STR syntax; see sim/test_conf_str.py.
     ('CONF_STR OSD-syntax lint', lambda: script_case('test_conf_str.py')),
+    # Profile-autodetect CRC table vs the actual ROM dumps (the RTL
+    # crc32_byte function was separately verified bit-exact against
+    # zlib.crc32 with a Verilator harness) — see sim/test_rom_crc.py.
+    ('Profile autodetect ROM CRC table', lambda: script_case('test_rom_crc.py')),
     # Static LCD pixel-map asset validation (segment coverage, palette
     # injectivity, sentinel encoding) — see sim/test_lcd_assets.py.
     ('LCD pixel-map assets (all 4 profiles)', lcd_assets_case),

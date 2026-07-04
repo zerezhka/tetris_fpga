@@ -7,6 +7,11 @@ localparam int          PROFILE_CLK_DIV[4]  = '{49, 194, 97, 52};
 localparam logic [15:0] PROFILE_TIMER_DIV[4] = '{16, 16, 8, 16};
 localparam logic [15:0] PROFILE_SOUND_FREQ_DIV[4] = '{64, 32, 32, 64};
 
+// CRC32 (zlib/IEEE, i.e. init 0xFFFFFFFF / reflected / final XOR)
+// of each profile's ROM dump — the hardware profile autodetect
+// compares the streamed .bin's CRC against these on "Auto".
+localparam logic [31:0] PROFILE_ROM_CRC32[4] = '{32'hF9CE0A69, 32'h85A44494, 32'hC8623CF2, 32'hE96D16C9};
+
 localparam logic [3:0] PROFILE_PP_WAKEUP[4] = '{0, 0, 0, 2};
 localparam logic [3:0] PROFILE_PM_WAKEUP[4] = '{0, 0, 0, 0};
 localparam logic [3:0] PROFILE_PS_WAKEUP[4] = '{4, 1, 1, 0};

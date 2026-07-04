@@ -38,6 +38,7 @@ import os
 import re
 import subprocess
 import sys
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BRICKEMUPY = os.path.join(ROOT, 'BrickEmuPy')
@@ -92,6 +93,12 @@ def build_profile(name):
         if bits and spec['port'] in jmap:
             jmap[spec['port']][spec['mask']] |= bits
 
+    # CRC32 (zlib/IEEE) of the ROM dump, for hardware profile autodetect:
+    # HT943.sv CRCs the .bin as it streams in over ioctl and, when the OSD
+    # selector is on "Auto", picks the matching profile automatically.
+    with open(os.path.join(BRICKEMUPY, 'assets', f'{name}.bin'), 'rb') as f:
+        rom_crc = zlib.crc32(f.read()) & 0xFFFFFFFF
+
     return {
         'name': name,
         'clk_div': clk_div,
@@ -104,6 +111,7 @@ def build_profile(name):
         'jmap': jmap,
         'reset_jmap': reset_jmap,
         'face_path': cfg['face_path'],
+        'rom_crc': rom_crc,
     }
 
 
@@ -118,6 +126,11 @@ def emit_svh(profiles, out_path):
         f'localparam int          PROFILE_CLK_DIV[{n}]  = \'{{{", ".join(str(p["clk_div"]) for p in profiles)}}};',
         f'localparam logic [15:0] PROFILE_TIMER_DIV[{n}] = \'{{{", ".join(str(p["timer_div"]) for p in profiles)}}};',
         f'localparam logic [15:0] PROFILE_SOUND_FREQ_DIV[{n}] = \'{{{", ".join(str(p["sound_freq_div"]) for p in profiles)}}};',
+        '',
+        '// CRC32 (zlib/IEEE, i.e. init 0xFFFFFFFF / reflected / final XOR)',
+        '// of each profile\'s ROM dump — the hardware profile autodetect',
+        '// compares the streamed .bin\'s CRC against these on "Auto".',
+        f'localparam logic [31:0] PROFILE_ROM_CRC32[{n}] = \'{{{", ".join(f"32\'h{p['rom_crc']:08X}" for p in profiles)}}};',
         '',
     ]
     # Port pullup values aren't generated here: nothing on the RTL side

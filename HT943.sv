@@ -58,14 +58,16 @@ localparam CONF_STR = {
 	"F1,BIN,Load ROM;",
 	"F2,SRO,Load Sound ROM;",
 	"-;",
-	// O67 = status bits [7:6]. NOT O01: bit 0 is the T0/R0 Reset button —
+	// O68 = status bits [8:6]. NOT O01: bit 0 is the T0/R0 Reset button —
 	// with the profile on bits [1:0], selecting profile 1 or 3 held the
 	// core in permanent reset. Values are COMMA-separated: a ';' ends the
 	// whole entry, and with ';' separators this option had a single value
 	// (the selector appeared dead — clicking wrapped straight back to 0)
 	// while the list tail parsed as garbage entries ("SpaceIntruder ..."
 	// became an S-entry: a ghost "Mount" row in the OSD).
-	"O67,ROM profile,E88 1MHz,KeychainPinBall 256kHz,Keychain55in1 512kHz,SpaceIntruder 950kHz;",
+	// Value 0 = Auto: the profile is detected from the loaded ROM's CRC32
+	// (see PROFILE AUTODETECT below); 1..4 force a specific profile.
+	"O68,ROM profile,Auto,E88 1MHz,KeychainPinBall 256kHz,Keychain55in1 512kHz,SpaceIntruder 950kHz;",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
@@ -133,13 +135,14 @@ pll pll
 
 // CPU clock enable: the core retires one instruction per enabled clock.
 // clk_sys is 50 MHz; target rates (PROFILE_CLK_DIV, from each ROM's real
-// .brick "clock") are selected by status[7:6] via rtl/ht943_profiles.svh.
+// .brick "clock") are selected by profile_sel (OSD selector / ROM-CRC
+// autodetect — see PROFILE AUTODETECT) via rtl/ht943_profiles.svh.
 reg [7:0] cpu_ce_div;
 reg       cpu_ce;
 reg [7:0] cpu_ce_target;
 wire [3:0] cpu_cycles; // per-instruction osc-cycle count from the core
 
-always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[status[7:6]][7:0];
+always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[profile_sel][7:0];
 
 // ce is suppressed during reset AND the 39-cycle profile-config load that
 // follows it (cfg_active below): cpu_ce_div free-ran through reset before,
@@ -239,7 +242,7 @@ always @(posedge clk_sys) begin
 				core_rom_addr <= ioctl_addr[11:0];
 				core_rom_data <= ioctl_dout;
 			end
-			6'd2: begin // .srom sound ROM
+			6'd2: begin // .sro sound ROM
 				core_srom_wr   <= 1;
 				core_srom_addr <= ioctl_addr[9:0];
 				core_srom_data <= ioctl_dout;
@@ -248,10 +251,60 @@ always @(posedge clk_sys) begin
 	end
 end
 
+///////////////////////   PROFILE AUTODETECT   ///////////////////
+
+// CRC32 the .bin as it streams in over ioctl (zlib/IEEE: init 0xFFFFFFFF,
+// reflected polynomial 0xEDB88320, final XOR — matching what
+// tools/gen_mister_profiles.py precomputed into PROFILE_ROM_CRC32) and
+// compare when the download ends. With the OSD selector on "Auto" the
+// matching profile is applied at the download's own reset — timings,
+// wakeup masks, sound config and LCD map all follow the ROM with no user
+// action. Unknown dumps fall back to profile 0 (E88); the selector's
+// explicit entries (status[8:6] = profile + 1) force any profile.
+
+function automatic [31:0] crc32_byte(input [31:0] crc, input [7:0] data);
+	reg [31:0] c;
+	integer i;
+	begin
+		c = crc ^ {24'd0, data};
+		for (i = 0; i < 8; i = i + 1)
+			c = (c >> 1) ^ (c[0] ? 32'hEDB88320 : 32'd0);
+		crc32_byte = c;
+	end
+endfunction
+
+reg [31:0] rom_crc;
+reg  [1:0] detected_profile;
+reg        rom_download_prev;
+wire       rom_download = ioctl_download && (ioctl_index[5:0] == 6'd1);
+wire [31:0] rom_crc_final = rom_crc ^ 32'hFFFFFFFF;
+
+always @(posedge clk_sys) begin
+	rom_download_prev <= rom_download;
+	if (rom_download && ioctl_wr)
+		rom_crc <= crc32_byte((ioctl_addr == 0) ? 32'hFFFFFFFF : rom_crc,
+		                      ioctl_dout);
+	// Compare on the download's falling edge. download_reset holds the
+	// core in reset for ~100ms after this, and cfg_profile keeps
+	// re-latching profile_sel for as long as reset is held, so the
+	// detected profile is always the one the post-download reset applies.
+	if (rom_download_prev && !rom_download)
+		detected_profile <=
+			(rom_crc_final == PROFILE_ROM_CRC32[1]) ? 2'd1 :
+			(rom_crc_final == PROFILE_ROM_CRC32[2]) ? 2'd2 :
+			(rom_crc_final == PROFILE_ROM_CRC32[3]) ? 2'd3 : 2'd0;
+end
+
+// OSD selector value 0 = Auto (use the detected profile), 1..4 = force.
+wire [2:0] profile_force = status[8:6] - 3'd1;
+wire [1:0] profile_sel = (status[8:6] == 3'd0) ? detected_profile
+                                               : profile_force[1:0];
+
 ///////////////////////   CONFIGURATION   ////////////////////////
 
 // Program the core's runtime parameters once after reset, from whichever
-// profile rtl/ht943_profiles.svh says status[7:6] selects (generated from
+// profile profile_sel picks (OSD forced value or ROM-CRC autodetect;
+// tables generated from
 // the real .brick config of each of the 4 verified ROMs — see
 // tools/gen_mister_profiles.py). cfg_profile latches the profile actually
 // being loaded, so button mapping and sound tables stay consistent even
@@ -272,13 +325,13 @@ always @(posedge clk_sys) begin
 	if (reset) begin
 		cfg_active <= 1;
 		cfg_idx    <= 0;
-		cfg_profile <= status[7:6];
+		cfg_profile <= profile_sel;
 
-		cfg_timer_div      <= PROFILE_TIMER_DIV[status[7:6]];
-		cfg_pp_wakeup      <= PROFILE_PP_WAKEUP[status[7:6]];
-		cfg_pm_wakeup      <= PROFILE_PM_WAKEUP[status[7:6]];
-		cfg_ps_wakeup      <= PROFILE_PS_WAKEUP[status[7:6]];
-		cfg_sound_freq_div <= PROFILE_SOUND_FREQ_DIV[status[7:6]];
+		cfg_timer_div      <= PROFILE_TIMER_DIV[profile_sel];
+		cfg_pp_wakeup      <= PROFILE_PP_WAKEUP[profile_sel];
+		cfg_pm_wakeup      <= PROFILE_PM_WAKEUP[profile_sel];
+		cfg_ps_wakeup      <= PROFILE_PS_WAKEUP[profile_sel];
+		cfg_sound_freq_div <= PROFILE_SOUND_FREQ_DIV[profile_sel];
 	end else if (cfg_active) begin
 		if (cfg_idx == CFG_WORDS - 1)
 			cfg_active <= 0;
