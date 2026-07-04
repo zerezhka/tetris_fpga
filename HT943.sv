@@ -47,8 +47,12 @@ assign VIDEO_ARY = 12'd7;
 localparam CONF_STR = {
 	"HT943;;",
 	"-;",
-	"F,BIN,Load ROM;",
-	"F,SROM,Load Sound ROM;",
+	// Explicit F-indices: without a digit, Main_MiSTer sends menusub+1 as
+	// ioctl_index (menu.cpp MENU_GENERIC_MAIN), i.e. whatever row the entry
+	// happens to sit on — pin them so the download decoder below can rely
+	// on 1=.bin / 2=.srom regardless of menu layout.
+	"F1,BIN,Load ROM;",
+	"F2,SROM,Load Sound ROM;",
 	"-;",
 	"O01,ROM profile,E88 1MHz;KeychainPinBall 256kHz;Keychain55in1 512kHz;SpaceIntruder 950kHz;",
 	"-;",
@@ -180,13 +184,16 @@ always @(posedge clk_sys) begin
 	core_srom_wr <= 0;
 
 	if (ioctl_download & ioctl_wr) begin
-		case (ioctl_index)
-			16'd0: begin // .bin program ROM
+		// Main_MiSTer packs the selected-extension number into bits [7:6]
+		// (menu.cpp: user_io_ext_idx() << 6 | ioctl_index), so match only
+		// the low 6 bits against the explicit F1/F2 indices from CONF_STR.
+		case (ioctl_index[5:0])
+			6'd1: begin // .bin program ROM
 				core_rom_wr   <= 1;
 				core_rom_addr <= ioctl_addr[11:0];
 				core_rom_data <= ioctl_dout;
 			end
-			16'd1: begin // .srom sound ROM
+			6'd2: begin // .srom sound ROM
 				core_srom_wr   <= 1;
 				core_srom_addr <= ioctl_addr[9:0];
 				core_srom_data <= ioctl_dout;
