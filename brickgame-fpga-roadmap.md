@@ -345,12 +345,16 @@ that's still verified separately by Phase 5's `sim/render_compare.py`.)
 
 #### Hardware bring-up TODO (as reported from live testing, 2026-07-04)
 
-- [ ] **Other 3 profiles half-work**: E88 8-in-1 plays well; KeychainPinBall /
-      Keychain55in1 / SpaceIntruderTK150I do render something on hardware but
-      look "кривовато" — need per-profile debugging (profile selector must be
-      switched in OSD to match the loaded ROM; timer/sound configs and LCD
-      maps are per-profile and each can be individually wrong).
-- [ ] **Install location / naming convention**: ship the core as
+- [ ] **Other 3 profiles: re-test after the CONF_STR fix.** Until 2026-07-04
+      the OSD profile selector was double-broken (O01 sat on the Reset status
+      bit; then the value list was ';'-separated so the option had a single
+      value) — every ROM ever tested on hardware actually ran with the E88
+      profile, which fully explains the "кривовато" rendering. With the fix
+      each profile still needs one honest hardware pass (timer/sound configs
+      and LCD maps are per-profile and each can be individually wrong).
+      NB for eyeball speed tests: E88↔SpaceIntruder differ by only 5%
+      (1 MHz vs 950 kHz) — use KeychainPinBall (256 kHz, 4×) as the probe.
+- [x] **Install location / naming convention**: shipped as
       `/media/fat/_Console/HT943_YYYYMMDD.rbf` (not bare `/media/fat/HT943.rbf`).
       The MiSTer core selector parses the version from the `_YYYYMMDD` filename
       suffix — without it the selector shows `--.--.--` instead of a version.
@@ -360,8 +364,42 @@ that's still verified separately by Phase 5's `sim/render_compare.py`.)
       procedurally-generated segment shapes instead of SVG rasterization
       (bricks ARE just squares-with-inner-dot; digits/text could stay SVG —
       idea from live testing: "сегменты вообще не обязательно в SVG рисовать").
+      Likely shape: keep `extract_segments_mask.py` for segment *ownership*
+      (which pixel belongs to which RAM bit) but draw the brick cells
+      procedurally from each segment's bounding box, so every brick is
+      pixel-identical by construction instead of per-brick rasterization
+      accidents.
 - [ ] **Sound**: `ht943_audio` output not yet confirmed audible on hardware.
+      (One suspect eliminated 2026-07-04: `.srom` files never matched the
+      OSD file browser — F-entry extensions are 3-char chunks — so a sound
+      ROM may simply never have been loaded. Files renamed to `.sro`.)
 - [ ] **Savestates**: not started.
+
+#### UX roadmap (one-click launch instead of the 3-step dance)
+
+Current flow — OSD → ROM profile → Load ROM → Load Sound ROM — is three
+manual steps and silently wrong if the profile doesn't match the ROM.
+Planned fixes, cheap-to-right:
+
+- [ ] **Remember last files (`FC1`/`FC2`)**: adding the `C` flag to the two
+      F-entries makes Main_MiSTer remember the last selected `.bin`/`.sro`
+      and auto-reload them on every core start. One char per entry in
+      CONF_STR, no core logic.
+- [ ] **Profile autodetect from ROM content**: all 4 supported ROMs are
+      known dumps — during ioctl download, hash the 4096 bytes (or compare
+      a few signature bytes at fixed addresses) and set the profile
+      automatically; timings, wakeup masks, LCD map and sound config then
+      all follow the ROM with zero user action. Keep the OSD selector as
+      "Auto / force E88 / ..." override for unknown dumps. This kills the
+      whole "loaded with the wrong profile → garbage picture that looks
+      like a hang" failure class.
+- [ ] **Sound ROM auto-load**: a core cannot ask the HPS for a companion
+      file (file transfers are strictly user-initiated), so ".sro if
+      present" is impossible directly. The MiSTer-native answer is
+      per-game `.mgl` launchers in `_Console/` (XML: core path + `<file>`
+      entries for index 1 = `.bin` and index 2 = `.sro`) — one menu click
+      loads core + ROM + sound ROM together. Four tiny files, generated
+      once, no rebuild needed.
 
 The remaining gap is polish + the 3 non-E88 profiles — rerun
 `python3 tools/gen_mister_profiles.py` after editing any upstream
