@@ -36,11 +36,9 @@ assign BUTTONS = 0;
 
 //////////////////////////////////////////////////////////////////
 
-// Portrait aspect ratio matching the LCD rasterizer's 120x280 canvas
-// (reduced 120:280 -> 3:7 — a real Brick Game handheld is much taller
-// than it is wide, not the 3:4 this previously claimed).
-assign VIDEO_ARX = 12'd3;
-assign VIDEO_ARY = 12'd7;
+// VIDEO_ARX/ARY (portrait 3:7, matching the 360x840 raster) are driven
+// by the video_freak instance in the LCD VIDEO section, which rewrites
+// them into exact pixel sizes when OSD integer scaling is enabled.
 
 `include "build_id.v"
 `include "rtl/ht943_profiles.svh"
@@ -68,6 +66,9 @@ localparam CONF_STR = {
 	// Value 0 = Auto: the profile is detected from the loaded ROM's CRC32
 	// (see PROFILE AUTODETECT below); 1..4 force a specific profile.
 	"O68,ROM profile,Auto,E88 1MHz,KeychainPinBall 256kHz,Keychain55in1 512kHz,SpaceIntruder 950kHz;",
+	// Integer scaling via sys/video_freak (SCALE input 0..3): V-Integer
+	// snaps height to a multiple of 840, the HV variants also snap width.
+	"O9A,Scale,Normal,V-Integer,HV-Integer(-),HV-Integer(+);",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
@@ -452,7 +453,27 @@ assign VGA_G = arcade_g;
 assign VGA_B = arcade_b;
 assign VGA_HS = arcade_hs;
 assign VGA_VS = arcade_vs;
-assign VGA_DE = arcade_de;
+
+// OSD "Scale" (status[10:9] -> video_freak SCALE 0..3): 0 keeps the plain
+// 3:7 aspect for ascal, 1..3 replace VIDEO_ARX/ARY with exact integer
+// pixel sizes so the 360x840 raster maps 1:N onto HDMI pixels.
+video_freak video_freak
+(
+	.CLK_VIDEO(CLK_VIDEO),
+	.CE_PIXEL(CE_PIXEL),
+	.VGA_VS(arcade_vs),
+	.HDMI_WIDTH(HDMI_WIDTH),
+	.HDMI_HEIGHT(HDMI_HEIGHT),
+	.VGA_DE(VGA_DE),
+	.VIDEO_ARX(VIDEO_ARX),
+	.VIDEO_ARY(VIDEO_ARY),
+	.VGA_DE_IN(arcade_de),
+	.ARX(12'd3),
+	.ARY(12'd7),
+	.CROP_SIZE(12'd0),
+	.CROP_OFF(5'd0),
+	.SCALE({1'b0, status[10:9]})
+);
 
 ///////////////////////   AUDIO   ////////////////////////////////
 
