@@ -558,6 +558,14 @@ Toolchain reality check:
   Zig (per taste — microzig targets RP2040); the emulator keeps original
   .bin dumps, incl. a future homebrew tetris, as the "cartridge format".
   Loses only cycle-level hardware honesty vs FPGA — invisible at 1 MHz.
+- **Parts list (2026-07-04, partly on hand)**: Pi Pico ✅, thin
+  high-capacity power-bank li-po cell ✅. To source: ST7565 128×64
+  module; 4× MX-style switches on hotswap sockets for the game cluster
+  (left/right/down/rotate — hotswap is the point: sockets are standalone
+  Kailh/Gateron parts you solder to the PCB, switches just clip in; NB
+  Kailh Choc has its own hotswap sockets too if the MX stack height
+  proves too thick for the flat cell); 3× cheap SMD tactile buttons for
+  on/off, play/pause, sound.
 - **Power budget** (the one thing the original does 1000× better: Holtek
   + static-drive reflective segment glass ≈ tens of µA ≈ a year on 2×AA):
   stock Pico ≈ 20-30 mA → days, not months. Mitigations, in order:
