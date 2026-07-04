@@ -133,15 +133,22 @@ def fixture_case(name, n, presses=()):
     return diff(ref, rtl)
 
 
-def lcd_assets_case():
-    r = subprocess.run([sys.executable,
-                        os.path.join(ROOT, 'sim', 'test_lcd_assets.py')],
+def script_case(script):
+    r = subprocess.run([sys.executable, os.path.join(ROOT, 'sim', script)],
                        capture_output=True, text=True)
     return r.returncode == 0, r.stdout + r.stderr
 
 
+def lcd_assets_case():
+    return script_case('test_lcd_assets.py')
+
+
 CASES = [
     # (label, thunk)
+    # Static CONF_STR lint against Main_MiSTer parser rules (status-bit
+    # collisions, value separators, extension chunking) — both hardware-only
+    # OSD bugs to date were CONF_STR syntax; see sim/test_conf_str.py.
+    ('CONF_STR OSD-syntax lint', lambda: script_case('test_conf_str.py')),
     # Static LCD pixel-map asset validation (segment coverage, palette
     # injectivity, sentinel encoding) — see sim/test_lcd_assets.py.
     ('LCD pixel-map assets (all 4 profiles)', lcd_assets_case),

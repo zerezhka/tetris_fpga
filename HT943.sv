@@ -2,7 +2,8 @@
 //
 //  MiSTer top-level for HT943 4-bit MCU / Brick Game core.
 //
-//  Supports loading .bin ROMs and .srom sound ROMs via the OSD, maps
+//  Supports loading .bin ROMs and .sro sound ROMs via the OSD (renamed
+//  from BrickEmuPy's .srom: MiSTer extensions are 3 chars max), maps
 //  gamepad/keyboard inputs to the HT943 button ports, and outputs LCD video
 //  and square-wave audio.
 //
@@ -50,14 +51,21 @@ localparam CONF_STR = {
 	// Explicit F-indices: without a digit, Main_MiSTer sends menusub+1 as
 	// ioctl_index (menu.cpp MENU_GENERIC_MAIN), i.e. whatever row the entry
 	// happens to sit on — pin them so the download decoder below can rely
-	// on 1=.bin / 2=.srom regardless of menu layout.
+	// on 1=.bin / 2=.sro regardless of menu layout. Extension fields are
+	// split into 3-char chunks by Main — "SROM" would parse as two
+	// extensions "SRO"+"M" and .srom files never matched the file browser,
+	// so sound ROMs on the SD card are named .sro.
 	"F1,BIN,Load ROM;",
-	"F2,SROM,Load Sound ROM;",
+	"F2,SRO,Load Sound ROM;",
 	"-;",
 	// O67 = status bits [7:6]. NOT O01: bit 0 is the T0/R0 Reset button —
 	// with the profile on bits [1:0], selecting profile 1 or 3 held the
-	// core in permanent reset, and the OSD selector appeared dead.
-	"O67,ROM profile,E88 1MHz;KeychainPinBall 256kHz;Keychain55in1 512kHz;SpaceIntruder 950kHz;",
+	// core in permanent reset. Values are COMMA-separated: a ';' ends the
+	// whole entry, and with ';' separators this option had a single value
+	// (the selector appeared dead — clicking wrapped straight back to 0)
+	// while the list tail parsed as garbage entries ("SpaceIntruder ..."
+	// became an S-entry: a ghost "Mount" row in the OSD).
+	"O67,ROM profile,E88 1MHz,KeychainPinBall 256kHz,Keychain55in1 512kHz,SpaceIntruder 950kHz;",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.

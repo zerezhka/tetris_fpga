@@ -369,6 +369,38 @@ The remaining gap is polish + the 3 non-E88 profiles — rerun
 `tools/extract_segments_mask.py` for the LCD maps (validated by
 `sim/test_lcd_assets.py`).
 
+#### Live debug notes (same session, 2026-07-04)
+
+- **Two spontaneous MiSTer reboots observed** during the same day (log file
+  empty, PID back to a low value like 701). The HPS side does not see the
+  core hang (`main` has no game-state knowledge — it is pure FPGA state),
+  but two unplanned reboots in one day is worth tracking (power? heat?).
+
+- **SpaceIntruder needs its own profile, not the E88 default.** Frequency,
+  wakeup masks, LCD map, timer and sound are all profile-specific. Correct
+  sequence:
+  1. OSD → ROM profile → **"SpaceIntruder 950kHz"**.
+  2. Load ROM → `SpaceIntruderTK150I.bin` (the load itself performs reset,
+     so the profile latches).
+  3. Load Sound ROM → `SpaceIntruderTK150I.sro` (on the SD card sound ROMs
+     are renamed `.srom` → `.sro`: MiSTer F-entry extensions are 3-char
+     chunks, `SROM` parsed as "SRO"+"M" and `.srom` files never matched
+     the file browser — likely why sound was never heard).
+
+  Running SpaceIntruder on the E88 profile explains the "кривовато" picture:
+  wrong wakeup masks (its `HALT` may never wake up → looks like a hang),
+  wrong LCD segment map, wrong timer and wrong sound. The fact that
+  *something* still draws is actually a good sign — it means the core is
+  executing.
+
+- **OSD → ROM profile does not change on click.** Root cause found:
+  `O01,ROM profile,...` in `CONF_STR` overlaps `T0,Reset` and
+  `R0,Reset and close OSD` on `status[0]`. Selecting profile 1 or 3 would
+  keep bit 0 high and hold the core in permanent reset, and the OSD control
+  itself conflicts with the reset buttons. Need to move the ROM profile to
+  free status bits (e.g. `O23` or any bits not used by `T0`/`R0`/`fx`) and
+  update all `status[1:0]` references in `HT943.sv`.
+
 ---
 
 ## 4. Key Reference Files
