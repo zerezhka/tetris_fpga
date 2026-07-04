@@ -54,7 +54,10 @@ localparam CONF_STR = {
 	"F1,BIN,Load ROM;",
 	"F2,SROM,Load Sound ROM;",
 	"-;",
-	"O01,ROM profile,E88 1MHz;KeychainPinBall 256kHz;Keychain55in1 512kHz;SpaceIntruder 950kHz;",
+	// O67 = status bits [7:6]. NOT O01: bit 0 is the T0/R0 Reset button —
+	// with the profile on bits [1:0], selecting profile 1 or 3 held the
+	// core in permanent reset, and the OSD selector appeared dead.
+	"O67,ROM profile,E88 1MHz;KeychainPinBall 256kHz;Keychain55in1 512kHz;SpaceIntruder 950kHz;",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
@@ -122,13 +125,13 @@ pll pll
 
 // CPU clock enable: the core retires one instruction per enabled clock.
 // clk_sys is 50 MHz; target rates (PROFILE_CLK_DIV, from each ROM's real
-// .brick "clock") are selected by status[1:0] via rtl/ht943_profiles.svh.
+// .brick "clock") are selected by status[7:6] via rtl/ht943_profiles.svh.
 reg [7:0] cpu_ce_div;
 reg       cpu_ce;
 reg [7:0] cpu_ce_target;
 wire [3:0] cpu_cycles; // per-instruction osc-cycle count from the core
 
-always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[status[1:0]][7:0];
+always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[status[7:6]][7:0];
 
 // ce is suppressed during reset AND the 39-cycle profile-config load that
 // follows it (cfg_active below): cpu_ce_div free-ran through reset before,
@@ -240,7 +243,7 @@ end
 ///////////////////////   CONFIGURATION   ////////////////////////
 
 // Program the core's runtime parameters once after reset, from whichever
-// profile rtl/ht943_profiles.svh says status[1:0] selects (generated from
+// profile rtl/ht943_profiles.svh says status[7:6] selects (generated from
 // the real .brick config of each of the 4 verified ROMs — see
 // tools/gen_mister_profiles.py). cfg_profile latches the profile actually
 // being loaded, so button mapping and sound tables stay consistent even
@@ -261,13 +264,13 @@ always @(posedge clk_sys) begin
 	if (reset) begin
 		cfg_active <= 1;
 		cfg_idx    <= 0;
-		cfg_profile <= status[1:0];
+		cfg_profile <= status[7:6];
 
-		cfg_timer_div      <= PROFILE_TIMER_DIV[status[1:0]];
-		cfg_pp_wakeup      <= PROFILE_PP_WAKEUP[status[1:0]];
-		cfg_pm_wakeup      <= PROFILE_PM_WAKEUP[status[1:0]];
-		cfg_ps_wakeup      <= PROFILE_PS_WAKEUP[status[1:0]];
-		cfg_sound_freq_div <= PROFILE_SOUND_FREQ_DIV[status[1:0]];
+		cfg_timer_div      <= PROFILE_TIMER_DIV[status[7:6]];
+		cfg_pp_wakeup      <= PROFILE_PP_WAKEUP[status[7:6]];
+		cfg_pm_wakeup      <= PROFILE_PM_WAKEUP[status[7:6]];
+		cfg_ps_wakeup      <= PROFILE_PS_WAKEUP[status[7:6]];
+		cfg_sound_freq_div <= PROFILE_SOUND_FREQ_DIV[status[7:6]];
 	end else if (cfg_active) begin
 		if (cfg_idx == CFG_WORDS - 1)
 			cfg_active <= 0;
