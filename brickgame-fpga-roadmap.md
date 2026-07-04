@@ -394,13 +394,15 @@ Planned fixes, cheap-to-right:
       bit-exact vs zlib.crc32 (Verilator harness); sim/test_rom_crc.py
       pins the table to the ROM files. This kills the whole "loaded with
       the wrong profile → garbage picture that looks like a hang" class.
-- [ ] **Sound ROM auto-load**: a core cannot ask the HPS for a companion
-      file (file transfers are strictly user-initiated), so ".sro if
-      present" is impossible directly. The MiSTer-native answer is
-      per-game `.mgl` launchers in `_Console/` (XML: core path + `<file>`
-      entries for index 1 = `.bin` and index 2 = `.sro`) — one menu click
-      loads core + ROM + sound ROM together. Four tiny files, generated
-      once, no rebuild needed.
+- [x] **Sound ROM auto-load / one-click launch** (2026-07-04): a core
+      cannot ask the HPS for a companion file (file transfers are strictly
+      user-initiated), so ".sro if present" is impossible directly. Done
+      the MiSTer-native way: per-game `.mgl` launchers in `_Console/`
+      ("E88 8in1", "Keychain PinBall", "Keychain 55in1", "Space Intruder"
+      — XML: `<rbf>_Console/HT943</rbf>` + `<file>` entries for index 1 =
+      `.bin` and index 2 = `.sro`, paths relative to `games/HT943/`).
+      Combined with CRC profile autodetect: one menu click = core + ROM +
+      sound ROM + correct profile.
 
 The remaining gap is polish + the 3 non-E88 profiles — rerun
 `python3 tools/gen_mister_profiles.py` after editing any upstream
@@ -505,6 +507,36 @@ python main.py
 | Audio | ~50 | — | Timer + 1-bit output |
 | Integration | ~500 | — | Buses, MiSTer glue |
 | **Total** | **~4,050** | **4 KB** | **Well within 85K LE budget** |
+
+---
+
+## 7. Experiment idea: homebrew ROM ("canonical tetris")
+
+Write an own game ROM for the core — the full dev loop already exists in
+this repo: cycle-exact CPU sim (Verilator + BrickEmuPy cross-check), LCD
+segment maps, and a hardware target that loads any 4 KB .bin over the OSD
+(unknown CRC → E88 profile fallback, whose face IS the classic tetris
+playfield — exactly what a homebrew tetris needs).
+
+Toolchain reality check:
+- **No C for this chip.** Holtek's HT-IDE3000 ships a C compiler
+  (Cross-C/HT-C) only for the 8-bit HT48/HT66 families; the 4-bit
+  HT44xxx/HT943 line is assembly-only. Rust/Zig are out of the question —
+  no LLVM backend exists for a 4-bit accumulator machine, and with 4-bit
+  registers, a 12-bit PC and paged RAM there's nothing for a high-level
+  compiler to stand on. Realistic path: HT-IDE3000 asm under Wine, or —
+  nicer — a tiny Python assembler in tools/ (the instruction table already
+  exists in the disassembler and in ht943_core.sv's decoder; an assembler
+  is its mirror).
+- **Dev loop**: asm → assemble to .bin → run in BrickEmuPy/Verilator tb
+  (bit-exact trace + LCD segment dump) → Load ROM on the FPGA core.
+  No silicon needed at any step.
+- **Real hardware is a dead end in 2026**: the HT943 die generation is
+  long EOL (only harvestable from old handhelds), and the bigger blocker
+  is the LCD — segment LCDs are custom-tooled glass, you can't buy "a
+  tetris screen" off the shelf. The FPGA core effectively *is* the
+  obtainable hardware; a homebrew ROM would also run on anyone else's
+  MiSTer.
 
 ---
 
