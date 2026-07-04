@@ -40,12 +40,20 @@ def parse_viewbox(root):
 
 
 def index_to_color(idx):
-    """Map segment index to an RGB color (avoiding black/white/near-bg)."""
-    r = ((idx * 37) & 0xFF)
-    g = ((idx * 97 + 64) & 0xFF)
-    b = ((idx * 151 + 128) & 0xFF)
-    if max(r, g, b) < 64:
-        b = 64
+    """Map segment index to a UNIQUE RGB color (never black, the bg).
+
+    The old (idx*const)&0xFF-per-channel formula repeated colors every 256
+    indices, so on faces with >256 segments (E88: 291, SpaceIntruder: 320)
+    segments 256+ silently aliased onto segments 0-34's colors and their
+    pixels got attributed to the wrong RAM bit — on hardware, E88's
+    leftmost playfield column simply wasn't rendered (pieces could move
+    one column further left than the visible field). Encode the index
+    injectively instead: R = low byte, G = high bits (offset so it's
+    never 0), B fixed.
+    """
+    r = idx & 0xFF
+    g = ((idx >> 8) & 0xFF) + 0x40
+    b = 0x80
     return f'#{r:02X}{g:02X}{b:02X}'
 
 
