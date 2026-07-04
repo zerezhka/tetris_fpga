@@ -124,7 +124,36 @@ module ht943_core #(
     //     single-port combinational read forced into LUT/FF storage
     //     instead (same tactic as `ram` below) rather than adding stall
     //     logic to the retire path.
-    logic [15:0] rom16 [0:4095];
+    // rom16 is split into 8 independent 2-bit-wide, 4096-deep slices rather
+    // than one 16-bit-wide array. Reason: Cyclone V's M10K natively holds
+    // 4096 words only at <=2 bits of width (10240 bits/block); at 16 bits
+    // wide a single logical word only gets 512 native words per block, so
+    // one 4096x16 array forces Quartus to CASCADE 8 physical M10Ks with
+    // auto-generated address-decode/chip-select glue between them — and
+    // that glue came out pathologically slow (152 logic levels, -172.9ns
+    // setup slack, confirmed via `report_timing` on the real build: the
+    // violating path ran from one cascaded block's write-enable register
+    // straight into another cascaded block's address register).
+    //
+    // First attempt at this split used a genvar-generated array-of-arrays
+    // (`rom16_slice[gi][...]`, one always_ff per genvar iteration) — but
+    // Quartus's RAM inference recombined all 8 back into a single 4096x16
+    // altsyncram anyway (confirmed via the map report: one "Simple Dual
+    // Port; 4096; 16" ALTSYNCRAM, not 8 separate ones), since it recognizes
+    // multiple array elements sharing identical address/clock/write-enable
+    // as one logical memory regardless of how the generate loop is
+    // written. Using 8 genuinely distinct, individually-named signals
+    // (not indexed elements of one declared array) avoids that regrouping
+    // — each gets its own always_ff below, hand-written rather than
+    // generated, specifically so nothing can tie them back together.
+    logic [1:0] rom16_b0 [0:4095];
+    logic [1:0] rom16_b1 [0:4095];
+    logic [1:0] rom16_b2 [0:4095];
+    logic [1:0] rom16_b3 [0:4095];
+    logic [1:0] rom16_b4 [0:4095];
+    logic [1:0] rom16_b5 [0:4095];
+    logic [1:0] rom16_b6 [0:4095];
+    logic [1:0] rom16_b7 [0:4095];
     (* ramstyle = "logic" *) logic [7:0] rom_b [0:4095];
     // rom_wr streaming-write shift state (see the single rom16 write
     // statement below): r_prev_byte shadows the previous streamed byte,
@@ -134,11 +163,20 @@ module ht943_core #(
     logic       r_wrap_pending;
     initial begin
         if (ROM_HEX_FILE != "") begin
-            logic [7:0] rom_init [0:4095];
+            logic [7:0]  rom_init [0:4095];
+            logic [15:0] w16;
             $readmemh(ROM_HEX_FILE, rom_init);
             for (int i = 0; i < 4096; i++) begin
                 rom_b[i] = rom_init[i];
-                rom16[i] = {rom_init[(i + 1) % 4096], rom_init[i]};
+                w16 = {rom_init[(i + 1) % 4096], rom_init[i]};
+                rom16_b0[i] = w16[1:0];
+                rom16_b1[i] = w16[3:2];
+                rom16_b2[i] = w16[5:4];
+                rom16_b3[i] = w16[7:6];
+                rom16_b4[i] = w16[9:8];
+                rom16_b5[i] = w16[11:10];
+                rom16_b6[i] = w16[13:12];
+                rom16_b7[i] = w16[15:14];
             end
         end
     end
@@ -497,7 +535,20 @@ module ht943_core #(
                 cnt = r_timer_cnt - ex_cycles;
                 tcv = n_tc;
                 tfv = n_tf;
-                for (int iter = 0; iter < 64; iter++) begin
+                // Mirrors BrickEmuPy's unbounded `while cnt <= 0` — but
+                // unrolled to only 4 iterations, not the paranoid 64 this
+                // used to be: the loop invariant is cnt > 0 on entry, the
+                // subtract above removes at most 8 (ex_cycles), and each
+                // firing adds r_timer_div back, so with r_timer_div >= 2
+                // at most ceil((8-1)/2)+... <= 4 firings ever occur. Every
+                // real HT943 mask uses timer_div of 8 or 16 (one firing
+                // max); div < 2 would diverge from the reference, and no
+                // such device exists. 64 serial 16-bit compare+add stages
+                // were the single biggest chunk of the CPU's combinational
+                // cone (~100ns+ of the -170ns setup violation on real
+                // Quartus timing analysis) — for a loop whose iterations
+                // 3..64 could never fire.
+                for (int iter = 0; iter < 4; iter++) begin
                     if (cnt <= 0) begin
                         cnt = cnt + r_timer_div;
                         if (n_timerf) begin
@@ -603,15 +654,21 @@ module ht943_core #(
         end
     end
 
-    // Isolated single-write-port always_ff — see the w_rom16_we comment
-    // above for why: Quartus's RAM-pattern matcher didn't recognize rom16
-    // as RAM-shaped at all when the write was just one more statement
-    // mixed into a big block alongside 20+ unrelated register updates; a
-    // small always_ff with one unconditional-enable write is the canonical
-    // shape RAM inference looks for.
-    always_ff @(posedge clk) begin
-        if (w_rom16_we) rom16[w_rom16_waddr] <= w_rom16_wdata;
-    end
+    // Isolated single-write-port always_ff per slice — see the w_rom16_we
+    // comment above for why isolation matters (Quartus's RAM-pattern
+    // matcher didn't recognize rom16 as RAM-shaped at all when the write
+    // was mixed into a block with 20+ unrelated register updates), and the
+    // rom16_b0..7 comment up top for why these are 8 separately-named
+    // signals (not a generate loop over one array) instead of one 16-bit
+    // array.
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b0[w_rom16_waddr] <= w_rom16_wdata[1:0];
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b1[w_rom16_waddr] <= w_rom16_wdata[3:2];
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b2[w_rom16_waddr] <= w_rom16_wdata[5:4];
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b3[w_rom16_waddr] <= w_rom16_wdata[7:6];
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b4[w_rom16_waddr] <= w_rom16_wdata[9:8];
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b5[w_rom16_waddr] <= w_rom16_wdata[11:10];
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b6[w_rom16_waddr] <= w_rom16_wdata[13:12];
+    always_ff @(posedge clk) if (w_rom16_we) rom16_b7[w_rom16_waddr] <= w_rom16_wdata[15:14];
 
     always_ff @(posedge clk) begin
         // Memory writes happen at clk_sys speed regardless of ce (MiSTer
@@ -711,15 +768,28 @@ module ht943_core #(
         end
     end
 
-    // Kept in its own always_ff, isolated from the big state-commit block
-    // above (Quartus's RAM-pattern matcher didn't recognize rom16 as
-    // RAM-shaped at all when this read was mixed into that block alongside
-    // 20+ unrelated register updates and a reset for-loop), and NOT gated
-    // by ce/rst (that also broke recognition — see the w_next_cur_pc
-    // comment above for where rst's effect on the read address now lives
-    // instead). Unconditional re-reading is harmless: w_next_cur_pc is a
-    // pure function of architectural state that's frozen whenever ce=0, so
-    // this just keeps re-fetching the same already-correct address.
-    always_ff @(posedge clk) r_rom16_q <= rom16[w_next_cur_pc];
+    // Kept in its own always_ff per slice, isolated from the big
+    // state-commit block above (Quartus's RAM-pattern matcher didn't
+    // recognize rom16 as RAM-shaped at all when this read was mixed into
+    // that block alongside 20+ unrelated register updates and a reset
+    // for-loop), and NOT gated by ce/rst (that also broke recognition —
+    // see the w_next_cur_pc comment above for where rst's effect on the
+    // read address now lives instead). Unconditional re-reading is
+    // harmless: w_next_cur_pc is a pure function of architectural state
+    // that's frozen whenever ce=0, so this just keeps re-fetching the same
+    // already-correct address. r_rom16_q is reassembled from the 8
+    // registered slices via plain bit concatenation (zero extra delay).
+    logic [1:0] r_rom16_q0, r_rom16_q1, r_rom16_q2, r_rom16_q3,
+                r_rom16_q4, r_rom16_q5, r_rom16_q6, r_rom16_q7;
+    always_ff @(posedge clk) r_rom16_q0 <= rom16_b0[w_next_cur_pc];
+    always_ff @(posedge clk) r_rom16_q1 <= rom16_b1[w_next_cur_pc];
+    always_ff @(posedge clk) r_rom16_q2 <= rom16_b2[w_next_cur_pc];
+    always_ff @(posedge clk) r_rom16_q3 <= rom16_b3[w_next_cur_pc];
+    always_ff @(posedge clk) r_rom16_q4 <= rom16_b4[w_next_cur_pc];
+    always_ff @(posedge clk) r_rom16_q5 <= rom16_b5[w_next_cur_pc];
+    always_ff @(posedge clk) r_rom16_q6 <= rom16_b6[w_next_cur_pc];
+    always_ff @(posedge clk) r_rom16_q7 <= rom16_b7[w_next_cur_pc];
+    assign r_rom16_q = {r_rom16_q7, r_rom16_q6, r_rom16_q5, r_rom16_q4,
+                         r_rom16_q3, r_rom16_q2, r_rom16_q1, r_rom16_q0};
 
 endmodule

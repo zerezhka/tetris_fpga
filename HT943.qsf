@@ -77,3 +77,31 @@ source sys/sys.tcl
 source sys/sys_analog.tcl
 source files.qip
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
+
+# Diagnostic attempt #1 (disabling physical-synthesis register retiming/
+# duplication/combo-logic scoped to ht943_core) made the violation slightly
+# WORSE (-178.8ns vs -171.1ns), same signature persisted — reverted.
+#set_instance_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF -to *|ht943_core:ht943_core|*
+#set_instance_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF -to *|ht943_core:ht943_core|*
+#set_instance_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC OFF -to *|ht943_core:ht943_core|*
+
+# Diagnostic attempt #2 (disabling REMOVE_REDUNDANT_LOGIC_CELLS and
+# ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP globally) landed at EXACTLY the
+# baseline unmodified-build slack (-171.118ns), so neither is responsible
+# either — reverted.
+#set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS OFF
+#set_global_assignment -name ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP OFF
+
+# Diagnostic attempt #3 (QII_AUTO_PACKED_REGISTERS OFF) was never built —
+# the theory behind all three attempts turned out wrong. The violating
+# path's endpoints only LOOK like RAM-internal registers because register
+# packing moved our prefetch registers into the M10K hard input/output
+# registers ("Packed 51 registers into blocks of type Block RAM" in the
+# fitter log). The actual path between them is the CPU's entire
+# single-cycle combinational cone (op/imm decode -> 64-iteration timer
+# loop -> n_tf -> interrupt-redirected next-PC -> ROM address input),
+# ~190ns of real logic vs the 20ns clk_sys period. The fix is the
+# multicycle constraint in HT943.sdc (the core only retires per `ce`,
+# every 50-195 clk_sys cycles) plus shrinking the timer loop in the RTL —
+# not netlist-optimization flags.
+#set_global_assignment -name QII_AUTO_PACKED_REGISTERS OFF
