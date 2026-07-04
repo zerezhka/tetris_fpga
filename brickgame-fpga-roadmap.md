@@ -537,6 +537,20 @@ Toolchain reality check:
   tetris screen" off the shelf. The FPGA core effectively *is* the
   obtainable hardware; a homebrew ROM would also run on anyone else's
   MiSTer.
+- **"Canonical tetris" needs no new screen.** Pazhitnov's original
+  (Electronika-60, 1984): 10×20 well, 7 tetrominoes of exactly 4 blocks,
+  uniform random (no bag/hold/ghost). The Brick Game segment field is
+  *already* 10×20 bricks — the geometry matches; what the 88-in-1 clones
+  break is the *piece set* (1/2/3/5-block pieces, weird rotations). So a
+  canonical-rules homebrew ROM runs on the existing E88 face as-is.
+- **Graphic-LCD tangent (Flipper-Zero-style ST7565R 128×64, mass-produced
+  ~$3)**: pairs with anything *except* an HT943 — the chip has dedicated
+  multiplexed COM/SEG segment-driver outputs, no SPI/parallel bus, and
+  nowhere near the RAM for a 1 KB framebuffer. A physical handheld built
+  around that screen would be a small FPGA (iCE40/Gowin) or any MCU
+  running this repo's core/emulator — at which point the HT943 is the
+  cartridge format, not the silicon. 10 cols × 3 px + 20 rows × 3 px =
+  30×60 of the 128×64 panel, so the well fits with room for score/next.
 
 ---
 
