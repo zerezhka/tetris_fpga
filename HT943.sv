@@ -55,6 +55,10 @@ localparam CONF_STR = {
 	"F2,SROM,Load Sound ROM;",
 	"-;",
 	"O01,ROM profile,E88 1MHz;KeychainPinBall 256kHz;Keychain55in1 512kHz;SpaceIntruder 950kHz;",
+	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
+	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
+	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
+	"J1,Fire,Start,Sound,OnOff,Pause;",
 	"-;",
 	"T0,Reset;",
 	"R0,Reset and close OSD;",
