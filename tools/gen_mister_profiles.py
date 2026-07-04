@@ -175,14 +175,14 @@ def gen_segment_maps(profiles):
         out_prefix = os.path.join(ASSETS_OUT, p['name'])
         subprocess.run([
             sys.executable, os.path.join(ROOT, 'tools', 'extract_segments_mask.py'),
-            svg_path, out_prefix, '120', '280',
+            svg_path, out_prefix, '120', '280', '3',
         ], check=True, env=env)
 
 
 def main():
     profiles = [build_profile(name) for name in PROFILES]
-    emit_svh(profiles, os.path.join(ROOT, 'rtl', 'ht943_profiles.svh'))
     gen_segment_maps(profiles)
+    emit_svh(profiles, os.path.join(ROOT, 'rtl', 'ht943_profiles.svh'))
     print(f'Wrote rtl/ht943_profiles.svh and {len(profiles)} segment maps to rtl/assets/',
           file=sys.stderr)
 

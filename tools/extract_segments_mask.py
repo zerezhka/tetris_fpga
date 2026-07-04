@@ -1,29 +1,45 @@
 #!/usr/bin/env python3
 """
-Extract a per-pixel LCD segment map from a BrickEmuPy face SVG.
+Extract per-pixel LCD segment ownership + per-segment geometry from a
+BrickEmuPy face SVG.
 
 BrickEmuPy marks each LCD segment with id="{ramByte}_{ramBit}" where ramByte
 is a CPU RAM address (0-255) and ramBit is a nibble bit (0-3). This tool
 assigns each segment a unique color, renders the SVG once via PyQt6, and
-reads back which segment owns each pixel. It emits:
+reads back which segment owns each coarse pixel. It emits:
 
-  - <outprefix>_seg.hex : one "byte bit" pair per segment (index 0..N-1)
-  - <outprefix>_pix.hex : per-pixel descriptor in row-major order.
-                          Each value is {byte[7:0], bit[1:0]} packed into
-                          bits [9:0], or 0x400 (bit 10 set) for background.
-                          Background needs the 11th bit: all 1024 10-bit
-                          codes are legal segment descriptors — 0x3FF IS
-                          segment (255,3), which E88/SpaceIntruder & co
-                          really use (SpaceIntruder's is the player ship),
-                          and an in-band 0x3FF sentinel silently made
-                          those segments permanently background.
+  - <outprefix>_seg.hex : one packed {byte[9:2], bit[1:0]} word per
+                          segment (index 0..N-1), $readmemh-ready
+  - <outprefix>_pix.hex : coarse (120x280) ownership map, row-major.
+                          Bits [8:0] = segment INDEX (not {byte,bit} — the
+                          RTL resolves index -> RAM address through the
+                          _seg.hex table), bit 9 = background. Background
+                          must be out-of-band: every in-band code is a
+                          legal index.
+  - <outprefix>_geo.hex : per-segment geometry at SCALE x the coarse
+                          resolution (360x840 for the default 3x), one
+                          54-bit word per segment:
+                          {brick[53], x[52:44], y[43:34], w[33:25],
+                           h[24:16], tx[15:12], ty[11:8], gx[7:4], gy[3:0]}
+                          Brick-classified segments are drawn procedurally
+                          by the RTL (frame tx/ty thick, gap gx/gy, solid
+                          fill — all measured from the SVG's own scanline
+                          runs) from this exact bbox; non-brick segments
+                          fill their coarse ownership cells as before.
+  - <outprefix>_meta.json : informational summary (segment/brick counts,
+                          size clusters) for humans and tests.
 
-The RTL LCD rasterizer loads the pixel map and lights a pixel when the
-segment that owns it has its RAM bit set.
+Why procedural bricks: rasterizing ~1px SVG brick outlines into a 120x280
+map quantized every brick differently ("each cube drawn by a different
+artist" on hardware), and a straight higher-res map doesn't fit M10K
+(4 profiles x 240x560 x 11b > the whole chip). Coarse ownership + exact
+float bboxes + procedural drawing gives pixel-identical bricks at 3x
+resolution while using slightly LESS memory than the old 11-bit map.
 
 Usage:
-    python3 tools/extract_segments_mask.py <face.svg> <outprefix> [width] [height]
+    python3 tools/extract_segments_mask.py <face.svg> <outprefix> [cw] [ch] [scale]
 """
+import json
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -48,14 +64,10 @@ def parse_viewbox(root):
 def index_to_color(idx):
     """Map segment index to a UNIQUE RGB color (never black, the bg).
 
-    The old (idx*const)&0xFF-per-channel formula repeated colors every 256
-    indices, so on faces with >256 segments (E88: 291, SpaceIntruder: 320)
-    segments 256+ silently aliased onto segments 0-34's colors and their
-    pixels got attributed to the wrong RAM bit — on hardware, E88's
-    leftmost playfield column simply wasn't rendered (pieces could move
-    one column further left than the visible field). Encode the index
-    injectively instead: R = low byte, G = high bits (offset so it's
-    never 0), B fixed.
+    Injective by construction: R = low byte, G = high bits (offset so it's
+    never 0), B fixed. A repeating-every-256 formula once aliased segments
+    256+ onto 0-34's colors (E88: 291 segs, SpaceIntruder: 320) and E88's
+    leftmost playfield column simply wasn't rendered on hardware.
     """
     r = idx & 0xFF
     g = ((idx >> 8) & 0xFF) + 0x40
@@ -68,7 +80,6 @@ def color_to_rgb(hexcolor):
 
 
 def set_shape_color(el, color):
-    """Set fill/stroke on a single shape element."""
     el.set('fill', color)
     if 'stroke' in el.attrib and el.attrib['stroke'].lower() not in ('none', ''):
         el.set('stroke', color)
@@ -91,64 +102,94 @@ def color_tree(el, color, seg_id_set):
         color_tree(child, color, seg_id_set)
 
 
-def extract(svg_path, outprefix, tw=120, th=280):
+def scan_runs(mask_row):
+    """Collapse a boolean scanline into [(value, length), ...] runs."""
+    runs = []
+    for v in mask_row:
+        if runs and runs[-1][0] == v:
+            runs[-1][1] += 1
+        else:
+            runs.append([v, 1])
+    return runs
+
+
+def brick_signature(own, bbox):
+    """Detect the frame+gap+dot brick pattern and measure it.
+
+    `own` is the per-pixel own-color mask of the hi-res render. A brick's
+    CENTER row and center column both read as exactly 5 runs:
+    colored(frame) / empty(gap) / colored(dot) / empty(gap) /
+    colored(frame). This is shape-based, so it survives every authoring
+    style in the BrickEmuPy faces: E88 draws bricks as 2-element groups,
+    Keychain55in1 as one compound path, and — critically — it REJECTS
+    SpaceIntruder's invader sprites, which share one uniform size with
+    each other (a size-cluster-only classifier turned them all into
+    bricks and erased the invaders).
+
+    Returns (tx, ty, gx, gy) measured from the runs, or None.
+    """
+    x, y, w, h = bbox
+    row = [own(x + i, y + h // 2) for i in range(w)]
+    col = [own(x + w // 2, y + j) for j in range(h)]
+    rr = scan_runs(row)
+    cr = scan_runs(col)
+    if len(rr) != 5 or len(cr) != 5:
+        return None
+    if not (rr[0][0] and not rr[1][0] and rr[2][0] and not rr[3][0] and rr[4][0]):
+        return None
+    if not (cr[0][0] and not cr[1][0] and cr[2][0] and not cr[3][0] and cr[4][0]):
+        return None
+    tx = round((rr[0][1] + rr[4][1]) / 2)
+    gx = round((rr[1][1] + rr[3][1]) / 2)
+    ty = round((cr[0][1] + cr[4][1]) / 2)
+    gy = round((cr[1][1] + cr[3][1]) / 2)
+    if min(tx, gx, ty, gy) < 1 or rr[2][1] < 2 or cr[2][1] < 2:
+        return None
+    return (min(15, tx), min(15, ty), min(15, gx), min(15, gy))
+
+
+def extract(svg_path, outprefix, cw=120, ch=280, scale=3):
     tree = ET.parse(svg_path)
     root = tree.getroot()
     vx, vy, vw, vh = parse_viewbox(root)
+    hw, hh = cw * scale, ch * scale  # hi-res raster the geometry targets
 
-    # Collect segment IDs and build an index -> (byte, bit) map.
+    # Collect segment IDs, in document order (defines the segment index).
     segs = []
     seg_ids = []
     seg_elements = {}
     for el in root.iter():
         m = re.match(r'^(\d+)_(\d+)$', el.get('id', ''))
         if m:
-            byte = int(m.group(1))
-            bit = int(m.group(2))
-            segs.append((byte, bit))
+            segs.append((int(m.group(1)), int(m.group(2))))
             seg_ids.append(el.get('id'))
             seg_elements[el.get('id')] = el
 
     if not segs:
         print('No segment ids found in SVG.', file=sys.stderr)
         return
+    if len(segs) > 512:
+        print(f'{len(segs)} segments > 512 (9-bit index limit)', file=sys.stderr)
+        return
 
     seg_id_set = set(seg_ids)
-
-    # Color the whole SVG black first, except segment groups.
     color_tree(root, '#000000', seg_id_set)
-
-    # Then color each segment group recursively with its unique color.
     for idx, eid in enumerate(seg_ids):
-        el = seg_elements[eid]
-        color_tree(el, index_to_color(idx), set())
+        color_tree(seg_elements[eid], index_to_color(idx), set())
 
-    # Render the color-coded SVG. Segments are thin LCD-segment lines, so at
-    # the RTL's raster resolution (120x280) most segment pixels sit on an
-    # antialiased edge blending two colors — neither of which is the exact
-    # solid color assigned to a segment, so an exact-color lookup at native
-    # resolution finds almost nothing. Instead render SS=4x oversampled with
-    # antialiasing off (so fills are solid, exact colors), then sample each
-    # target pixel's center point from that oversampled image — same effect
-    # as point-sampling a vector image at the target resolution, without
-    # storing the oversampled bitmap.
-    SS = 4
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     svg_text = ET.tostring(root, encoding='unicode')
     renderer = QtSvg.QSvgRenderer(QtCore.QByteArray(svg_text.encode('utf-8')))
 
-    # The face SVG is the WHOLE toy (body, buttons, bezel — e.g. E88 is
-    # 365x859) and the LCD segments occupy only a small window of it.
-    # Rendering the full viewBox into the 120x280 raster squeezed all
-    # segments into a ~48x70 patch at the toy screen's position (first
-    # hardware bring-up rendered exactly that shredded thumbnail). So:
-    # pass 1 renders the full face at low resolution just to locate the
-    # segments' bounding box in SVG coordinates; pass 2 restricts the
-    # renderer's viewBox to that box (small margin, and only the LCD
-    # region) so the segment window alone fills the whole raster.
-    color_to_idx_probe = {color_to_rgb(index_to_color(idx)): idx
-                          for idx in range(len(segs))}
-    PW, PH = 730, 1718  # ~2x the typical face viewBox; exact value uncritical
+    # The face SVG is the WHOLE toy (body, buttons, bezel) and the LCD
+    # occupies only a window of it. Probe pass: render the full face at
+    # low resolution just to locate the segments' bounding box in SVG
+    # coordinates, then crop the renderer's viewBox to it.
+    # (QSvgRenderer.boundsOnElement is NOT usable here: it ignores parent
+    # group transforms, so per-segment bounds come out wrong for these
+    # Inkscape-authored faces — first attempt classified 1 brick in E88.)
+    color_to_idx = {color_to_rgb(index_to_color(i)): i for i in range(len(segs))}
+    PW, PH = 730, 1718
     probe = QtGui.QImage(PW, PH, QtGui.QImage.Format.Format_RGB888)
     probe.fill(0)
     p = QtGui.QPainter(probe)
@@ -158,14 +199,12 @@ def extract(svg_path, outprefix, tw=120, th=280):
     xs, ys = [], []
     for y in range(PH):
         for x in range(PW):
-            if (probe.pixel(x, y) & 0xFFFFFF) in color_to_idx_probe:
+            if (probe.pixel(x, y) & 0xFFFFFF) in color_to_idx:
                 xs.append(x)
                 ys.append(y)
     if not xs:
         print('Segment probe render found no segment pixels.', file=sys.stderr)
         return
-    # Probe pixel -> SVG coords, plus a 1-probe-pixel margin so antialiased
-    # segment edges at the window border aren't cropped off.
     x0 = vx + (min(xs) - 1) * vw / PW
     x1 = vx + (max(xs) + 2) * vw / PW
     y0 = vy + (min(ys) - 1) * vh / PH
@@ -174,101 +213,238 @@ def extract(svg_path, outprefix, tw=120, th=280):
           f'y {y0:.1f}..{y1:.1f} (of {vw:.0f}x{vh:.0f})', file=sys.stderr)
     renderer.setViewBox(QtCore.QRectF(x0, y0, x1 - x0, y1 - y0))
 
-    img = QtGui.QImage(tw * SS, th * SS, QtGui.QImage.Format.Format_RGB888)
+    # Per-segment bboxes from a render at the EXACT hi-res raster size:
+    # extents are then in final display coordinates with 1px precision.
+    bimg = QtGui.QImage(hw, hh, QtGui.QImage.Format.Format_RGB888)
+    bimg.fill(0)
+    p = QtGui.QPainter(bimg)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
+    renderer.render(p, QtCore.QRectF(0, 0, hw, hh))
+    p.end()
+    ext = {}
+    for y in range(hh):
+        for x in range(hw):
+            i = color_to_idx.get(bimg.pixel(x, y) & 0xFFFFFF)
+            if i is not None:
+                e = ext.get(i)
+                if e is None:
+                    ext[i] = [x, y, x, y]
+                else:
+                    if x < e[0]: e[0] = x
+                    if y < e[1]: e[1] = y
+                    if x > e[2]: e[2] = x
+                    if y > e[3]: e[3] = y
+    bboxes = []
+    for i in range(len(segs)):
+        e = ext.get(i)
+        if e is None:
+            bboxes.append((0, 0, 1, 1))  # rescue pass handles visibility
+        else:
+            bboxes.append((e[0], e[1], e[2] - e[0] + 1, e[3] - e[1] + 1))
+
+    # Brick detection: shape signature on the hi-res render, per segment.
+    seg_colors = {i: color_to_rgb(index_to_color(i)) for i in range(len(segs))}
+
+    def make_own(i):
+        want = seg_colors[i]
+        return lambda px, py: (bimg.pixel(px, py) & 0xFFFFFF) == want
+
+    brick_metrics = []   # per segment: (tx, ty, gx, gy) or None
+    for i in range(len(segs)):
+        brick_metrics.append(brick_signature(make_own(i), bboxes[i]))
+    brick_flags = [m is not None for m in brick_metrics]
+    n_brick = sum(brick_flags)
+
+    # Uniformize per size-cluster: raster extents and run measurements
+    # wobble ±1px per brick from rounding — the exact artifact procedural
+    # drawing exists to kill. Bricks whose (w, h) agree within 2px form a
+    # cluster (E88 has two: the 20x33 playfield and the 14x24 next-piece
+    # cells); each snaps to its cluster's modal size and median metrics.
+    clusters = []  # [(w, h), [indices]]
+    for i in range(len(segs)):
+        if not brick_flags[i]:
+            continue
+        _, _, w, h = bboxes[i]
+        for c in clusters:
+            if abs(c[0][0] - w) <= 2 and abs(c[0][1] - h) <= 2:
+                c[1].append(i)
+                break
+        else:
+            clusters.append([(w, h), [i]])
+    for (cw_, ch_), members in clusters:
+        med = lambda vals: sorted(vals)[len(vals) // 2]
+        uw = med([bboxes[i][2] for i in members])
+        uh = med([bboxes[i][3] for i in members])
+        ut = (med([brick_metrics[i][0] for i in members]),
+              med([brick_metrics[i][1] for i in members]),
+              med([brick_metrics[i][2] for i in members]),
+              med([brick_metrics[i][3] for i in members]))
+        for i in members:
+            x, y, w, h = bboxes[i]
+            nx = max(0, min(hw - uw, x + (w - uw) // 2))
+            ny = max(0, min(hh - uh, y + (h - uh) // 2))
+            bboxes[i] = (nx, ny, uw, uh)
+            brick_metrics[i] = ut
+
+    # Coarse ownership render: SS x SS oversample of the COARSE grid with
+    # antialiasing off, majority-of-block ownership at >= 1/4 coverage
+    # (center-ish sampling made ~1px features flicker per sub-pixel
+    # phase). Brick cells get overwritten by exact bbox stamping below —
+    # color coverage can't attribute a brick's gap-ring cells (they
+    # contain no segment color at all), which punched holes through the
+    # procedural fill on Keychain55in1's big bricks.
+    SS = 4
+    img = QtGui.QImage(cw * SS, ch * SS, QtGui.QImage.Format.Format_RGB888)
     img.fill(0)
     p = QtGui.QPainter(img)
     p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
-    # QSvgRenderer.render(painter) with no target rect paints at the SVG's
-    # native viewBox size anchored at (0,0) — it does NOT scale to fill the
-    # painter's device, so a 365x859 face rendered into a small image would
-    # just show its top-left corner cropped. Pass an explicit target rect.
-    renderer.render(p, QtCore.QRectF(0, 0, tw * SS, th * SS))
+    # render() with no target rect paints at the SVG's native viewBox size
+    # anchored at (0,0) — it does NOT scale to the device. Explicit rect.
+    renderer.render(p, QtCore.QRectF(0, 0, cw * SS, ch * SS))
     p.end()
 
-    # Build color -> index lookup.
-    color_to_idx = {color_to_rgb(index_to_color(idx)): idx for idx in range(len(segs))}
+    BG = 0x200  # bit 9 = background; bits [8:0] = segment index
 
-    BG = 0x400  # bit 10 = background; bits [9:0] = {byte, bit} descriptor
-
-    pixel_owner = [[BG] * tw for _ in range(th)]
+    pixel_owner = [[BG] * cw for _ in range(ch)]
     seen_idx = set()
-    # Coverage sampling, not center-point sampling: each target pixel is
-    # owned by the segment covering the most of its SSxSS oversampled
-    # block (if it covers at least ~1/4 of it). Center-point sampling made
-    # every ~1px-thick SVG feature (the brick outlines) flicker in and out
-    # depending on sub-pixel phase — bricks came out with visibly
-    # different shapes ("each cube drawn by a different artist" on real
-    # hardware). Majority-of-block ownership quantizes every brick the
-    # same way.
     min_cover = (SS * SS) // 4
-    for y in range(th):
-        for x in range(tw):
+    for y in range(ch):
+        for x in range(cw):
             counts = {}
-            for sy in range(SS):
-                for sx in range(SS):
-                    rgb = img.pixel(x * SS + sx, y * SS + sy) & 0xFFFFFF
-                    idx = color_to_idx.get(rgb)
-                    if idx is not None:
-                        counts[idx] = counts.get(idx, 0) + 1
+            for sy_ in range(SS):
+                for sx_ in range(SS):
+                    rgb = img.pixel(x * SS + sx_, y * SS + sy_) & 0xFFFFFF
+                    i = color_to_idx.get(rgb)
+                    if i is not None:
+                        counts[i] = counts.get(i, 0) + 1
             if not counts:
                 continue
-            idx, cover = max(counts.items(), key=lambda kv: kv[1])
+            i, cover = max(counts.items(), key=lambda kv: kv[1])
             if cover >= min_cover:
-                byte, bit = segs[idx]
-                pixel_owner[y][x] = (byte << 2) | (bit & 3)
-                seen_idx.add(idx)
+                pixel_owner[y][x] = i
+                seen_idx.add(i)
 
-    # Rescue pass: a segment thin enough to slip between pixel-center
-    # samples (SpaceIntruder has one) would otherwise vanish from the map
-    # entirely. For each such segment, scan every pixel's full SSxSS
-    # oversampled block and claim the first still-background pixel that
-    # contains any of the segment's color.
-    lost = [i for i in range(len(segs)) if i not in seen_idx]
-    for idx in lost:
-        want = color_to_rgb(index_to_color(idx))
+    # Brick bbox stamping: claim every coarse cell a brick's bbox
+    # overlaps, keyed by overlap area on conflicts. The RTL clips the
+    # drawing to the exact bbox, so over-claiming costs nothing, while
+    # any unclaimed cell inside the bbox would punch a hole through the
+    # procedural frame/fill (Keychain55in1's gap-ring cells contained no
+    # segment color at all). Never steals cells from non-brick segments.
+    #
+    # One owner per coarse cell is a hard limit though: where the grid
+    # pitch is so tight that two bricks' bboxes overlap the same cell by
+    # >= 1px each (E88's NEXT block: 14px cells on a ~15px pitch vs 3px
+    # coarse cells), one brick necessarily loses its frame edge there.
+    # Such bricks are DEMOTED back to plain coarse rendering — which is
+    # how they've always looked — and stamping reruns until stable.
+    base_owner = [row[:] for row in pixel_owner]
+
+    def cell_range(v, size):
+        return range(v // scale, min(size, (v + size - 1) // scale + 1))
+
+    while True:
+        pixel_owner = [row[:] for row in base_owner]
+        stamp_overlap = {}
+        for i in range(len(segs)):
+            if not brick_flags[i]:
+                continue
+            bx, by, bw, bh = bboxes[i]
+            for cyy in range(by // scale, min(ch, (by + bh - 1) // scale + 1)):
+                for cxx in range(bx // scale, min(cw, (bx + bw - 1) // scale + 1)):
+                    cur = pixel_owner[cyy][cxx]
+                    if cur != BG and cur != i and not brick_flags[cur]:
+                        continue
+                    ovx = min(bx + bw, (cxx + 1) * scale) - max(bx, cxx * scale)
+                    ovy = min(by + bh, (cyy + 1) * scale) - max(by, cyy * scale)
+                    ov = ovx * ovy
+                    if cur == BG or cur == i or ov > stamp_overlap.get((cxx, cyy), 0):
+                        pixel_owner[cyy][cxx] = i
+                        stamp_overlap[(cxx, cyy)] = ov
+        demoted = 0
+        for i in range(len(segs)):
+            if not brick_flags[i]:
+                continue
+            bx, by, bw, bh = bboxes[i]
+            ok = True
+            for cyy in range(by // scale, min(ch, (by + bh - 1) // scale + 1)):
+                for cxx in range(bx // scale, min(cw, (bx + bw - 1) // scale + 1)):
+                    ovx = min(bx + bw, (cxx + 1) * scale) - max(bx, cxx * scale)
+                    ovy = min(by + bh, (cyy + 1) * scale) - max(by, cyy * scale)
+                    if ovx >= 1 and ovy >= 1 and pixel_owner[cyy][cxx] != i:
+                        ok = False
+            if not ok:
+                brick_flags[i] = False
+                brick_metrics[i] = None
+                demoted += 1
+        if not demoted:
+            break
+        print(f'demoted {demoted} bricks to coarse rendering '
+              f'(coarse-cell conflicts)', file=sys.stderr)
+    n_brick = sum(brick_flags)
+    for y in range(ch):
+        for x in range(cw):
+            if pixel_owner[y][x] != BG:
+                seen_idx.add(pixel_owner[y][x])
+
+    # Rescue pass: a segment thin enough to slip between samples entirely
+    # (SpaceIntruder has one) claims the first background pixel whose
+    # oversampled block contains any of its color.
+    for i in [i for i in range(len(segs)) if i not in seen_idx]:
+        want = color_to_rgb(index_to_color(i))
         found = False
-        for y in range(th):
+        for y in range(ch):
             if found:
                 break
-            for x in range(tw):
+            for x in range(cw):
                 if pixel_owner[y][x] != BG:
                     continue
-                block_has = any(
-                    (img.pixel(x * SS + sx, y * SS + sy) & 0xFFFFFF) == want
-                    for sy in range(SS) for sx in range(SS))
-                if block_has:
-                    byte, bit = segs[idx]
-                    pixel_owner[y][x] = (byte << 2) | (bit & 3)
+                if any((img.pixel(x * SS + sx_, y * SS + sy_) & 0xFFFFFF) == want
+                       for sy_ in range(SS) for sx_ in range(SS)):
+                    pixel_owner[y][x] = i
                     found = True
                     break
         if not found:
-            print(f'WARNING: segment {seg_ids[idx]} has no pixels even in '
+            print(f'WARNING: segment {seg_ids[i]} has no pixels even in '
                   f'the oversampled render', file=sys.stderr)
 
-    seg_path = f'{outprefix}_seg.hex'
-    pix_path = f'{outprefix}_pix.hex'
-
-    with open(seg_path, 'w') as f:
+    # Packed {byte[9:2], bit[1:0]} — one token per line so the RTL can
+    # $readmemh it directly as the index -> RAM-address table (the old
+    # "B7 2" two-token format would load as two separate words).
+    with open(f'{outprefix}_seg.hex', 'w') as f:
         for byte, bit in segs:
-            f.write(f'{byte:02X} {bit:01X}\n')
+            f.write(f'{(byte << 2) | bit:03X}\n')
 
-    with open(pix_path, 'w') as f:
-        for y in range(th):
-            for x in range(tw):
+    with open(f'{outprefix}_pix.hex', 'w') as f:
+        for y in range(ch):
+            for x in range(cw):
                 f.write(f'{pixel_owner[y][x]:03X}\n')
 
-    non_bg = sum(1 for y in range(th) for x in range(tw) if pixel_owner[y][x] != BG)
-    print(f'Wrote {len(segs)} segments to {seg_path}', file=sys.stderr)
-    print(f'Wrote {tw}x{th} pixel map to {pix_path} ({non_bg} non-bg pixels)',
-          file=sys.stderr)
+    with open(f'{outprefix}_geo.hex', 'w') as f:
+        for i, (x, y, w, h) in enumerate(bboxes):
+            tx, ty, gx, gy = brick_metrics[i] or (0, 0, 0, 0)
+            word = (int(brick_flags[i]) << 53) | (x << 44) | (y << 34) \
+                   | (w << 25) | (h << 16) \
+                   | (tx << 12) | (ty << 8) | (gx << 4) | gy
+            f.write(f'{word:014X}\n')
+
+    with open(f'{outprefix}_meta.json', 'w') as f:
+        json.dump({'n_segments': len(segs), 'n_bricks': n_brick,
+                   'clusters': [{'w': c[0][0], 'h': c[0][1],
+                                 'n': len(c[1])} for c in clusters],
+                   'scale': scale}, f, indent=1)
+
+    non_bg = sum(1 for y in range(ch) for x in range(cw)
+                 if pixel_owner[y][x] != BG)
+    print(f'Wrote {len(segs)} segments ({n_brick} bricks in '
+          f'{len(clusters)} size clusters) to {outprefix}_*.hex '
+          f'({non_bg} non-bg coarse pixels)', file=sys.stderr)
 
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(1)
-    svg_path = sys.argv[1]
-    outprefix = sys.argv[2]
-    tw = int(sys.argv[3]) if len(sys.argv) > 3 else 120
-    th = int(sys.argv[4]) if len(sys.argv) > 4 else 280
-    extract(svg_path, outprefix, tw, th)
+    extract(sys.argv[1], sys.argv[2],
+            int(sys.argv[3]) if len(sys.argv) > 3 else 120,
+            int(sys.argv[4]) if len(sys.argv) > 4 else 280,
+            int(sys.argv[5]) if len(sys.argv) > 5 else 3)

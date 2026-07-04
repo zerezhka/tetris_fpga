@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     top->clk = 1; top->eval();
     top->rst = 0;
 
-    const int W = 120, H = 280;
+    const int W = 360, H = 840;
     std::vector<unsigned char> fb(W * H * 3, 0);
 
     // Track (x,y) from ce_pix pulses directly rather than duplicating the
@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     bool in_vblank_prev = true;
     bool frame_captured = false;
     long guard = 0;
-    const long GUARD_MAX = 3L * 160 * 292 * 18; // ~3 frames' worth of clk_sys ticks
+    const long GUARD_MAX = 3L * 480 * 875 * 2 + 1000; // ~3 frames' worth of clk_sys ticks
 
     while (!frame_captured && guard++ < GUARD_MAX) {
         int addr = top->ram_addr;

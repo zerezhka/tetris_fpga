@@ -424,7 +424,7 @@ ht943_lcd lcd
 wire [7:0] arcade_r, arcade_g, arcade_b;
 wire       arcade_hs, arcade_vs, arcade_de;
 
-arcade_video #(.WIDTH(120), .DW(24), .GAMMA(1)) arcade_video
+arcade_video #(.WIDTH(360), .DW(24), .GAMMA(1)) arcade_video
 (
 	.clk_video(clk_sys),
 	.ce_pix(lcd_ce),

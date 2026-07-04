@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-Static validation of the generated LCD pixel maps (rtl/assets/*_pix.hex)
+Static validation of the generated LCD assets (rtl/assets/*_{pix,seg,geo}.hex)
 against their source SVGs — the regression class that produced E88's
 invisible leftmost playfield column on hardware (index_to_color aliased
 segments 256+ onto segments 0-34's colors, so their pixels were written
 to the wrong RAM bits; only faces with >256 segments were affected, and
 no trace-level test can see it: the CPU state was perfect, the pixels lied).
 
+Asset formats (see tools/extract_segments_mask.py):
+  *_pix.hex : coarse 120x280 ownership, bits [8:0] = segment index,
+              bit 9 = background.
+  *_seg.hex : per segment, packed {ramByte[9:2], ramBit[1:0]}.
+  *_geo.hex : per segment, {brick[53], x[52:44], y[43:34], w[33:25],
+              h[24:16], tx[15:12], ty[11:8], gx[7:4], gy[3:0]}.
+
 Checks, per profile face:
   1. index_to_color is injective over this face's segment count (guards
      the generator itself against a future palette regression);
-  2. every distinct (ramByte, ramBit) pair that the SVG declares (via its
-     "<byte>_<bit>" segment ids, mirrored into *_seg.hex) is referenced by
-     at least one pixel in *_pix.hex — i.e. no segment silently dropped
-     out of the raster;
-  3. every (byte, bit) referenced by *_pix.hex is one the SVG declares —
-     no pixels attributed to RAM bits that don't drive a segment.
+  2. every segment index is referenced by at least one pixel in *_pix.hex
+     — i.e. no segment silently dropped out of the raster;
+  3. every index referenced by *_pix.hex is < the segment count — no
+     pixels attributed to segments that don't exist;
+  4. geometry sanity: every bbox lies inside the 360x840 hi-res raster;
+     every brick-flagged segment has non-zero frame/gap metrics and is
+     big enough to hold frame+gap+fill in both axes (a zero or oversized
+     metric would procedurally draw garbage or nothing).
 
 Pure-Python, no Qt/Verilator needed: it validates the COMMITTED hex
 assets, so it also catches "generator was fixed but assets were not
@@ -34,48 +43,83 @@ from extract_segments_mask import index_to_color  # noqa: E402
 PROFILES = ['E88_8in1', 'KeychainPinBall', 'Keychain55in1',
             'SpaceIntruderTK150I']
 
+HW, HH = 360, 840
+BG = 0x200
+
 
 def check_face(name):
     errors = []
     seg_path = os.path.join(ROOT, 'rtl', 'assets', f'{name}_seg.hex')
     pix_path = os.path.join(ROOT, 'rtl', 'assets', f'{name}_pix.hex')
+    geo_path = os.path.join(ROOT, 'rtl', 'assets', f'{name}_geo.hex')
 
-    seg_pairs = []
     with open(seg_path) as f:
-        for line in f:
-            byte_hex, bit_hex = line.split()
-            seg_pairs.append((int(byte_hex, 16), int(bit_hex, 16)))
-    declared = set(seg_pairs)
+        seg_words = [int(line, 16) for line in f]
+    nsegs = len(seg_words)
+    if any(w > 0x3FF for w in seg_words):
+        errors.append('seg.hex word exceeds 10 bits')
 
-    colors = [index_to_color(i) for i in range(len(seg_pairs))]
-    if len(set(colors)) != len(colors):
-        errors.append(f'index_to_color not injective over {len(seg_pairs)} '
-                      f'segments ({len(colors) - len(set(colors))} collisions)')
+    colors = [index_to_color(i) for i in range(nsegs)]
+    if len(set(colors)) != nsegs:
+        errors.append(f'index_to_color not injective over {nsegs} '
+                      f'segments ({nsegs - len(set(colors))} collisions)')
 
     referenced = set()
+    npix = 0
     with open(pix_path) as f:
         for line in f:
             v = int(line, 16)
-            if not (v & 0x400):
-                referenced.add(((v >> 2) & 0xFF, v & 3))
+            npix += 1
+            if not (v & BG):
+                referenced.add(v & 0x1FF)
+    if npix != 120 * 280:
+        errors.append(f'pix.hex has {npix} words, expected {120 * 280}')
 
-    missing = declared - referenced
+    missing = set(range(nsegs)) - referenced
     if missing:
-        errors.append(f'{len(missing)} declared segment RAM bits have no '
-                      f'pixels in the map: {sorted(missing)[:10]}')
-    phantom = referenced - declared
+        errors.append(f'{len(missing)} segments have no pixels in the '
+                      f'map: {sorted(missing)[:10]}')
+    phantom = {i for i in referenced if i >= nsegs}
     if phantom:
-        errors.append(f'{len(phantom)} RAM bits referenced by pixels but '
-                      f'declared by no segment: {sorted(phantom)[:10]}')
+        errors.append(f'{len(phantom)} out-of-range segment indices in '
+                      f'pix.hex: {sorted(phantom)[:10]}')
 
-    return errors
+    with open(geo_path) as f:
+        geo_words = [int(line, 16) for line in f]
+    if len(geo_words) < nsegs:
+        errors.append(f'geo.hex has {len(geo_words)} words for {nsegs} '
+                      f'segments')
+    nbricks = 0
+    for i, wd in enumerate(geo_words[:nsegs]):
+        brick = wd >> 53
+        x = (wd >> 44) & 0x1FF
+        y = (wd >> 34) & 0x3FF
+        w = (wd >> 25) & 0x1FF
+        h = (wd >> 16) & 0x1FF
+        tx = (wd >> 12) & 0xF
+        ty = (wd >> 8) & 0xF
+        gx = (wd >> 4) & 0xF
+        gy = wd & 0xF
+        if x + w > HW or y + h > HH or w == 0 or h == 0:
+            errors.append(f'segment {i}: bbox {x},{y} {w}x{h} outside '
+                          f'{HW}x{HH} raster')
+        if brick:
+            nbricks += 1
+            if min(tx, ty, gx, gy) < 1:
+                errors.append(f'brick segment {i}: zero frame/gap metric '
+                              f'({tx},{ty},{gx},{gy})')
+            if 2 * (tx + gx) >= w or 2 * (ty + gy) >= h:
+                errors.append(f'brick segment {i}: metrics ({tx},{ty},'
+                              f'{gx},{gy}) leave no fill in {w}x{h}')
+    return errors, nsegs, nbricks
 
 
 def main():
     failed = 0
     for name in PROFILES:
-        errs = check_face(name)
-        print(f"{'FAIL' if errs else 'PASS'}  {name} (LCD pixel-map assets)")
+        errs, nsegs, nbricks = check_face(name)
+        print(f"{'FAIL' if errs else 'PASS'}  {name} "
+              f"({nsegs} segments, {nbricks} bricks)")
         for e in errs:
             print(f'  {e}')
         failed += bool(errs)
