@@ -5,7 +5,11 @@
 proc generateBuildID_Verilog {} {
 
 	# Get the timestamp (see: http://www.altera.com/support/examples/tcl/tcl-date-time-stamp.html)
-	set buildDate "`define BUILD_DATE \"[clock format [ clock seconds ] -format %y%m%d]\""
+	# Local change vs upstream MiSTer: include HHMM, not just the date —
+	# several same-day bring-up builds were indistinguishable in the OSD
+	# version line, making "is the new bitstream actually running?"
+	# unanswerable from the device itself.
+	set buildDate "`define BUILD_DATE \"[clock format [ clock seconds ] -format %y%m%d-%H%M]\""
 
 	# Create a Verilog file for output
 	set outputFileName "build_id.v"
