@@ -59,6 +59,13 @@ int main(int argc, char** argv) {
     top->pm_in = pm;
     top->ps_in = ps;
 
+    // CE_DIV=N (env): assert ce only 1 clk in N, mimicking the MiSTer
+    // wrapper's clk_sys/ce divider (50 for the 1MHz E88 profile). Default
+    // 1 = ce every clock, the mode every pre-hardware trace ran in.
+    long ce_div = 1;
+    if (const char* s = std::getenv("CE_DIV")) ce_div = atol(s);
+    if (ce_div < 1) ce_div = 1;
+
     // Tie off the runtime loading/config ports — not used in trace mode.
     top->ce = 1;
     top->rom_wr = 0;
@@ -93,6 +100,17 @@ int main(int argc, char** argv) {
         top->pp_in = pp;
         top->pm_in = pm;
         top->ps_in = ps;
+
+        // Idle clk cycles between retires, ce low — architectural state
+        // must stay frozen through these for the traces to match CE_DIV=1.
+        top->ce = 0;
+        for (long k = 1; k < ce_div; k++) {
+            top->clk = 0;
+            top->eval();
+            top->clk = 1;
+            top->eval();
+        }
+        top->ce = 1;
 
         // combinational outputs already reflect pre-instruction state
         top->eval();

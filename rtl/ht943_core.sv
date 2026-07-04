@@ -772,23 +772,34 @@ module ht943_core #(
     // state-commit block above (Quartus's RAM-pattern matcher didn't
     // recognize rom16 as RAM-shaped at all when this read was mixed into
     // that block alongside 20+ unrelated register updates and a reset
-    // for-loop), and NOT gated by ce/rst (that also broke recognition —
-    // see the w_next_cur_pc comment above for where rst's effect on the
-    // read address now lives instead). Unconditional re-reading is
-    // harmless: w_next_cur_pc is a pure function of architectural state
-    // that's frozen whenever ce=0, so this just keeps re-fetching the same
-    // already-correct address. r_rom16_q is reassembled from the 8
-    // registered slices via plain bit concatenation (zero extra delay).
+    // for-loop). rst's effect on the read address is folded into
+    // w_next_cur_pc itself (see its comment above) rather than being a
+    // second read expression here.
+    //
+    // The read MUST be gated by ce. It used to be unconditional, on the
+    // theory that w_next_cur_pc is frozen while ce=0 — but it isn't:
+    // right after the ce edge the architectural state has advanced to
+    // instruction N+1, so w_next_cur_pc (a function of the *currently
+    // executing* instruction's next-state signals) already points at
+    // N+2, and the very first idle clk clobbered the not-yet-executed
+    // N+1's prefetched op/imm. Invisible with ce tied high (no idle
+    // clks — how every pre-hardware trace ran) but on real hardware
+    // (ce = 1-in-50+) it offset the whole instruction stream by one:
+    // first hardware bring-up executed ROM[PC+1] at every PC. Caught by
+    // CE_DIV=50 vs CE_DIV=1 trace diff in sim/tb_ht943.cpp. A plain
+    // clock-enable on a synchronous read still maps to the M10K's
+    // native rden, so RAM inference survives (unlike the earlier
+    // ce/rst-gated *two-expression* read shape, which didn't).
     logic [1:0] r_rom16_q0, r_rom16_q1, r_rom16_q2, r_rom16_q3,
                 r_rom16_q4, r_rom16_q5, r_rom16_q6, r_rom16_q7;
-    always_ff @(posedge clk) r_rom16_q0 <= rom16_b0[w_next_cur_pc];
-    always_ff @(posedge clk) r_rom16_q1 <= rom16_b1[w_next_cur_pc];
-    always_ff @(posedge clk) r_rom16_q2 <= rom16_b2[w_next_cur_pc];
-    always_ff @(posedge clk) r_rom16_q3 <= rom16_b3[w_next_cur_pc];
-    always_ff @(posedge clk) r_rom16_q4 <= rom16_b4[w_next_cur_pc];
-    always_ff @(posedge clk) r_rom16_q5 <= rom16_b5[w_next_cur_pc];
-    always_ff @(posedge clk) r_rom16_q6 <= rom16_b6[w_next_cur_pc];
-    always_ff @(posedge clk) r_rom16_q7 <= rom16_b7[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q0 <= rom16_b0[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q1 <= rom16_b1[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q2 <= rom16_b2[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q3 <= rom16_b3[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q4 <= rom16_b4[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q5 <= rom16_b5[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q6 <= rom16_b6[w_next_cur_pc];
+    always_ff @(posedge clk) if (ce) r_rom16_q7 <= rom16_b7[w_next_cur_pc];
     assign r_rom16_q = {r_rom16_q7, r_rom16_q6, r_rom16_q5, r_rom16_q4,
                          r_rom16_q3, r_rom16_q2, r_rom16_q1, r_rom16_q0};
 

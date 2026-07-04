@@ -122,6 +122,44 @@ def extract(svg_path, outprefix, tw=120, th=280):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     svg_text = ET.tostring(root, encoding='unicode')
     renderer = QtSvg.QSvgRenderer(QtCore.QByteArray(svg_text.encode('utf-8')))
+
+    # The face SVG is the WHOLE toy (body, buttons, bezel — e.g. E88 is
+    # 365x859) and the LCD segments occupy only a small window of it.
+    # Rendering the full viewBox into the 120x280 raster squeezed all
+    # segments into a ~48x70 patch at the toy screen's position (first
+    # hardware bring-up rendered exactly that shredded thumbnail). So:
+    # pass 1 renders the full face at low resolution just to locate the
+    # segments' bounding box in SVG coordinates; pass 2 restricts the
+    # renderer's viewBox to that box (small margin, and only the LCD
+    # region) so the segment window alone fills the whole raster.
+    color_to_idx_probe = {color_to_rgb(index_to_color(idx)): idx
+                          for idx in range(len(segs))}
+    PW, PH = 730, 1718  # ~2x the typical face viewBox; exact value uncritical
+    probe = QtGui.QImage(PW, PH, QtGui.QImage.Format.Format_RGB888)
+    probe.fill(0)
+    p = QtGui.QPainter(probe)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
+    renderer.render(p, QtCore.QRectF(0, 0, PW, PH))
+    p.end()
+    xs, ys = [], []
+    for y in range(PH):
+        for x in range(PW):
+            if (probe.pixel(x, y) & 0xFFFFFF) in color_to_idx_probe:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        print('Segment probe render found no segment pixels.', file=sys.stderr)
+        return
+    # Probe pixel -> SVG coords, plus a 1-probe-pixel margin so antialiased
+    # segment edges at the window border aren't cropped off.
+    x0 = vx + (min(xs) - 1) * vw / PW
+    x1 = vx + (max(xs) + 2) * vw / PW
+    y0 = vy + (min(ys) - 1) * vh / PH
+    y1 = vy + (max(ys) + 2) * vh / PH
+    print(f'Segment window in SVG coords: x {x0:.1f}..{x1:.1f}, '
+          f'y {y0:.1f}..{y1:.1f} (of {vw:.0f}x{vh:.0f})', file=sys.stderr)
+    renderer.setViewBox(QtCore.QRectF(x0, y0, x1 - x0, y1 - y0))
+
     img = QtGui.QImage(tw * SS, th * SS, QtGui.QImage.Format.Format_RGB888)
     img.fill(0)
     p = QtGui.QPainter(img)
