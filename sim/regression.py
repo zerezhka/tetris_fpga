@@ -143,6 +143,10 @@ def lcd_assets_case():
     return script_case('test_lcd_assets.py')
 
 
+def device_pack_case():
+    return script_case('test_device_pack.py')
+
+
 CASES = [
     # (label, thunk)
     # Static CONF_STR lint against Main_MiSTer parser rules (status-bit
@@ -156,6 +160,10 @@ CASES = [
     # Static LCD pixel-map asset validation (segment coverage, palette
     # injectivity, sentinel encoding) — see sim/test_lcd_assets.py.
     ('LCD pixel-map assets (all 4 profiles)', lcd_assets_case),
+    # .pak device-pack generator: pack->parse roundtrip, byte-exact
+    # cross-check against rtl/ht943_profiles.svh and rtl/assets/*.hex —
+    # see tools/gen_device_pack.py / sim/test_device_pack.py.
+    ('Device-pack roundtrip (all 4 profiles)', device_pack_case),
     ('E23PlusMarkII96in1 (fetch/decode/execute)', lambda: real_rom_case('E23PlusMarkII96in1')),
     ('E88_8in1 (fetch/decode/execute)', lambda: real_rom_case('E88_8in1')),
     ('GA888 (fetch/decode/execute)', lambda: real_rom_case('GA888')),
