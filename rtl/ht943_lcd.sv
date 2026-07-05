@@ -198,15 +198,14 @@ module ht943_lcd #(
     // determines initial contents (mirrors what two separate $readmemh
     // hex files would do) — it does not add a read/write port to either
     // array.
-    logic [53:0] geotab_init [0:511];
-    integer gi;
-    initial begin
-        $readmemh("rtl/assets/E88_8in1_geo.hex", geotab_init);
-        for (gi = 0; gi < 512; gi = gi + 1) begin
-            geotab_lo[gi] = geotab_init[gi][31:0];
-            geotab_hi[gi] = geotab_init[gi][53:32];
-        end
-    end
+    // $readmemh straight into each RAM from pre-split hex files
+    // (written by tools/extract_segments_mask.py alongside the full
+    // 54-bit _geo.hex). Initializing through a shared [53:0] scratch
+    // array + for-loop worked under Verilator but Quartus 17 silently
+    // dropped the init entirely (geotab MIF=None in the map report):
+    // the fallback face powered up with a zeroed geotab on hardware.
+    initial $readmemh("rtl/assets/E88_8in1_geo_lo.hex", geotab_lo);
+    initial $readmemh("rtl/assets/E88_8in1_geo_hi.hex", geotab_hi);
 
     // ---- single write port per table (Quartus-safe: one address, one
     // full-word write per cycle, no other driver of these arrays) ----

@@ -485,13 +485,24 @@ def extract(svg_path, outprefix, cw=120, ch=280, scale=3):
             for x in range(cw):
                 f.write(f'{pixel_owner[y][x]:03X}\n')
 
-    with open(f'{outprefix}_geo.hex', 'w') as f:
+    # The full 54-bit words (consumed by gen_device_pack.py) plus the
+    # same words pre-split into the lo/hi halves matching ht943_lcd's
+    # separately-named geotab_lo/geotab_hi RAMs. The RTL $readmemh's the
+    # split files DIRECTLY into each RAM: initializing them through a
+    # shared intermediate array compiles under Verilator but Quartus 17
+    # silently drops the init (geotab MIF=None in the map report — the
+    # fallback face powered up with a zeroed geotab on real hardware).
+    with open(f'{outprefix}_geo.hex', 'w') as f, \
+         open(f'{outprefix}_geo_lo.hex', 'w') as flo, \
+         open(f'{outprefix}_geo_hi.hex', 'w') as fhi:
         for i, (x, y, w, h) in enumerate(bboxes):
             tx, ty, gx, gy = brick_metrics[i] or (0, 0, 0, 0)
             word = (int(brick_flags[i]) << 53) | (x << 44) | (y << 34) \
                    | (w << 25) | (h << 16) \
                    | (tx << 12) | (ty << 8) | (gx << 4) | gy
             f.write(f'{word:014X}\n')
+            flo.write(f'{word & 0xFFFFFFFF:08X}\n')
+            fhi.write(f'{word >> 32:06X}\n')
 
     # Well candidates = the biggest size cluster (uniformized above, and
     # immune to stamping demotions: a demoted cell still sits in the well).
