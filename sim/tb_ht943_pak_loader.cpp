@@ -83,6 +83,18 @@ int main(int argc, char** argv) {
         top->data = pak[i];
         tick();
         if (top->done) saw_done = true;
+        // Idle gap cycles between bytes, still with rst held high — the
+        // real HPS ioctl never delivers back-to-back bytes. This is what
+        // catches any "clear scratch state on rst" logic that would fire
+        // between the low and high byte of a 16-bit field (found the
+        // hard way: byte_lo was zeroed in every gap on hardware while a
+        // gapless tb streamed clean).
+        top->wr = 0;
+        int gap = 1 + (int)(i % 3);
+        for (int g = 0; g < gap; g++) {
+            tick();
+            if (top->done) saw_done = true;
+        }
     }
     top->wr = 0;
     top->rst = 0;

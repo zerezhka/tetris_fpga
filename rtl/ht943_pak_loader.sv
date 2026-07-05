@@ -284,10 +284,16 @@ module ht943_pak_loader (
                 if (addr == PACK_SIZE - 1)
                     done <= 1;
             end
-        end else if (rst) begin
-            byte_lo  <= 0;
-            word_acc <= 0;
         end
+        // No rst clear of byte_lo/word_acc AT ALL — not even in idle
+        // cycles. download_reset holds rst=1 for the ENTIRE download and
+        // real ioctl bytes arrive with idle gaps between wr strobes, so
+        // an `else if (rst)` clear fires in every gap and zeroes byte_lo
+        // between the low and high byte of every 16-bit field (found on
+        // hardware: every cfg/frame/segtab/pixmap low byte read back as
+        // 0 — blank screen; invisible in a tb that streams a byte every
+        // cycle). These are pure datapath scratch: stale contents are
+        // harmless, every field fully re-latches from the stream.
     end
 
 endmodule
