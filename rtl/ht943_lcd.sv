@@ -64,10 +64,6 @@ module ht943_lcd #(
     input  logic        clk,
     input  logic        rst,
 
-    // 1 = "Compressed": disable procedural bricks, segments fill their
-    // coarse cells whole — the original 120x280 renderer's chunky look.
-    input  logic        chunky,
-
     // Well-frame outer rect (360x840 raster coords). x0==x1 disables it.
     // Driven by HT943.sv's cfg_frame_* registers (fallback array indexed
     // by profile_sel, or the pak config section once loaded).
@@ -321,7 +317,7 @@ module ht943_lcd #(
     reg dark;
     always @(posedge clk)
         dark <= frame_hit ||
-                (lit_state && ((geo_brick && !chunky) ? brick_dark : 1'b1));
+                (lit_state && (geo_brick ? brick_dark : 1'b1));
 
     // ---- output stage: geometry delayed 3 cycles to match the data ----
     reg [2:0] d_hsync, d_vsync, d_hblank, d_vblank, d_active, d_ce;

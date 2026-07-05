@@ -79,10 +79,6 @@ localparam CONF_STR = {
 	// AR the ideal width is an integer multiple at every V scale, so
 	// both HV variants degenerate into V-Integer on any display.
 	"O9,Scale,V-Integer,Fit;",
-	// Compressed = the pre-3x chunky look: procedural bricks off,
-	// segments fill their coarse 120x280 cells — every brick quantized
-	// differently. Kept on purpose, it has charm.
-	"OB,LCD Style,SVG,Compressed;",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
@@ -613,8 +609,6 @@ ht943_lcd lcd
 (
 	.clk(clk_sys),
 	.rst(reset),
-	.chunky(status[11]),
-
 	.frame_x0(cfg_frame_x0), .frame_y0(cfg_frame_y0),
 	.frame_x1(cfg_frame_x1), .frame_y1(cfg_frame_y1),
 
