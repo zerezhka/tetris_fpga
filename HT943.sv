@@ -71,12 +71,14 @@ localparam CONF_STR = {
 	// Value 0 = Auto: the profile is detected from the loaded ROM's CRC32
 	// (see PROFILE AUTODETECT below); 1..4 force a specific profile.
 	"O68,ROM profile,Auto,E88 1MHz,KeychainPinBall 256kHz,Keychain55in1 512kHz,SpaceIntruder 950kHz;",
-	// Integer scaling via sys/video_freak: V-Integer (default, hence
-	// FIRST value — Main has no default field, index 0 is it) snaps
-	// height to a multiple of 840, the HV variants also snap width,
-	// Normal is plain ascal stretch. Remapped to video_freak's SCALE
-	// encoding at the instantiation.
-	"O9A,Scale,V-Integer,Normal,HV-Integer(-),HV-Integer(+);",
+	// Scaling via sys/video_freak: V-Integer (default, hence FIRST
+	// value — Main has no default field, index 0 is it) snaps height to
+	// a multiple of 840; Fit is plain ascal stretch to screen height
+	// (non-integer, the charmingly ragged legacy look). video_freak's
+	// HV-Integer modes were dropped: with a 360x840 source at exact 3:7
+	// AR the ideal width is an integer multiple at every V scale, so
+	// both HV variants degenerate into V-Integer on any display.
+	"O9,Scale,V-Integer,Fit;",
 	// Compressed = the pre-3x chunky look: procedural bricks off,
 	// segments fill their coarse 120x280 cells — every brick quantized
 	// differently. Kept on purpose, it has charm.
@@ -88,10 +90,10 @@ localparam CONF_STR = {
 	"-;",
 	"T0,Reset;",
 	"R0,Reset and close OSD;",
-	// v1: Scale option added with V-Integer as value 0 — bump discards
-	// configs saved against the old bit layout (day-one release, no
-	// installed base to protect).
-	"v,1;",
+	// v2: Scale shrank from 2 bits (O9A) to 1 (O9) when the HV-Integer
+	// values were dropped — bump discards configs saved against the old
+	// bit layout (day-one release, no installed base to protect).
+	"v,2;",
 	"V,v",`BUILD_DATE
 };
 
@@ -683,10 +685,9 @@ video_freak video_freak
 	.ARY(12'd7),
 	.CROP_SIZE(12'd0),
 	.CROP_OFF(5'd0),
-	// OSD value order is V-Integer,Normal,HV-,HV+ (default-first);
-	// video_freak encodes 0=normal 1=V-int 2=HV- 3=HV+, so swap 0<->1.
-	.SCALE((status[10:9] == 2'd0) ? 3'd1 :
-	       (status[10:9] == 2'd1) ? 3'd0 : {1'b0, status[10:9]})
+	// OSD value order is V-Integer,Fit (default-first); video_freak
+	// encodes 0=normal(fit) 1=V-integer.
+	.SCALE(status[9] ? 3'd0 : 3'd1)
 );
 
 ///////////////////////   AUDIO   ////////////////////////////////
