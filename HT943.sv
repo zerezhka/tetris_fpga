@@ -79,6 +79,16 @@ localparam CONF_STR = {
 	// AR the ideal width is an integer multiple at every V scale, so
 	// both HV variants degenerate into V-Integer on any display.
 	"O9,Scale,V-Integer,Fit;",
+	// LCD-emulation look, live toggles on the freed status bits 10/11.
+	// persistence (bit 10, default On=first value) models the ~100-250ms
+	// passive-matrix segment switch so brief transients (SpaceIntruder
+	// shot, PinBall blinkers) leave a fading gray trace instead of being
+	// dropped. Ghost cells (bit 11, default Off) faintly draws every
+	// segment even when unlit, the way a real reflective LCD's segments
+	// are always dimly visible under ambient light — makes a screenshot
+	// show the whole face without catching the right frame.
+	"OA,LCD persistence,On,Off;",
+	"OB,Ghost cells,Off,On;",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
@@ -609,6 +619,10 @@ ht943_lcd lcd
 (
 	.clk(clk_sys),
 	.rst(reset),
+	// LCD look toggles: bit 10 On=first value -> persist active when 0;
+	// bit 11 Off=first value -> ghost active when 1.
+	.persist_en(~status[10]),
+	.ghost_en(status[11]),
 	.frame_x0(cfg_frame_x0), .frame_y0(cfg_frame_y0),
 	.frame_x1(cfg_frame_x1), .frame_y1(cfg_frame_y1),
 

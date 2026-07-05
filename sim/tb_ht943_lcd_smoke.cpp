@@ -42,6 +42,11 @@ int main(int argc, char** argv) {
 
     // Table write ports default idle; a pak stream drives them below.
     lcd->pixmap_wr = 0; lcd->segtab_wr = 0; lcd->geotab_wr = 0;
+    // LCD look options: exercise the shipping default look — persistence
+    // on (segments ramp/saturate; the DISCARD_FRAMES loop below waits them
+    // out to full ink), ghost off (unlit cells stay paper, so a saturated
+    // all-on face is byte-identical to the old crisp render).
+    lcd->persist_en = 1; lcd->ghost_en = 0;
 
     if (use_pak) {
         FILE* pf = fopen(pak_arg, "rb");

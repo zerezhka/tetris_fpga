@@ -81,6 +81,20 @@ module ht943_lcd #(
     input  logic        clk,
     input  logic        rst,
 
+    // LCD-emulation options (live OSD toggles, no reset dependency):
+    //   persist_en : model passive-matrix persistence ("ghosting") — a
+    //                lit segment fades in and a dark one fades out over a
+    //                few frames (the accram accumulator). When 0, segments
+    //                switch instantaneously (the old crisp 1-bit look).
+    //   ghost_en   : draw every segment cell faintly even when unlit, the
+    //                way a real reflective LCD's segment outlines are always
+    //                dimly visible under ambient light. Makes a screenshot
+    //                show the whole face layout without catching the right
+    //                frame. The accumulator keeps running regardless of
+    //                persist_en; these flags only pick what the pixel shows.
+    input  logic        persist_en,
+    input  logic        ghost_en,
+
     // Well-frame outer rect (360x840 raster coords). x0==x1 disables it.
     // Driven by HT943.sv's cfg_frame_* registers (fallback array indexed
     // by profile_sel, or the pak config section once loaded).
@@ -400,22 +414,36 @@ module ht943_lcd #(
     // shape_mask: WHERE ink can go within this segment's cell (unchanged
     // from the old binary renderer's geometry) -- brick segments only ink
     // the frame ring / inner fill, everything else inks its whole coarse
-    // cell. HOW DARK is now entirely the persistence accumulator's job:
-    // acc_shade is the top 2 bits of acc_word, S2-aligned like geo/seg.
+    // cell. acc_shade is the persistence accumulator's top 2 bits (0..3),
+    // S2-aligned like geo/seg.
     wire       shape_mask = geo_brick ? brick_dark : 1'b1;
     wire [1:0] acc_shade  = acc_word[3:2];
+    // on_shade: how dark this segment reads when it is (or was recently)
+    // ON. With persistence, the accumulator's fading gray; without, plain
+    // full-ink-iff-lit-right-now (seg_lit is valid this cycle alongside
+    // acc_word -- same S2 seg_word -> ram_addr -> ram_data read).
+    wire [1:0] on_shade = persist_en ? acc_shade : (seg_lit ? 2'd3 : 2'd0);
+    // This pixel is inside a real (non-background) segment's ink footprint:
+    // the whole coarse cell for icons/text, the frame+fill for bricks.
+    wire       seg_cell = !bg2 && shape_mask;
 
     // Registered: the S2 outputs (and the combinational RAM read + bbox
     // math on them) are valid 2 cycles after S0; registering here makes
     // the data path a uniform 3 cycles, matching the d_*[2] geometry taps.
-    // frame_hit is bezel PRINT (not LCD) -- always full shade. Background
-    // pixels are always shade 0. Everything else is shade 0 outside its
-    // shape_mask, else the segment's own persistence accumulator.
-    reg [1:0] shade;
+    //
+    // level 0..4 selects the output color: 0 paper, 1 ghost (the faint
+    // always-visible segment outline of a real reflective LCD under
+    // ambient light), 2/3 the two persistence mid-grays, 4 full ink. The
+    // printed well frame is bezel ink -> always 4; background is always 0.
+    // A segment cell that is currently un-lit reads ghost (level 1) when
+    // ghost_en, else paper -- so a screenshot reveals the whole face.
+    reg [2:0] level;
     always @(posedge clk)
-        shade <= frame_hit ? 2'd3 :
-                 bg2       ? 2'd0 :
-                 shape_mask ? acc_shade : 2'd0;
+        level <= frame_hit         ? 3'd4 :
+                 !seg_cell          ? 3'd0 :
+                 (on_shade == 2'd0) ? (ghost_en ? 3'd1 : 3'd0) :
+                 (on_shade == 2'd1) ? 3'd2 :
+                 (on_shade == 2'd2) ? 3'd3 : 3'd4;
 
     // ---- output stage: geometry delayed 3 cycles to match the data ----
     reg [2:0] d_hsync, d_vsync, d_hblank, d_vblank, d_active, d_ce;
@@ -435,16 +463,19 @@ module ht943_lcd #(
     assign ce_pix = d_ce[2];
 
     // Reflective LCD look: segments read dark against a pale panel
-    // background (a real TN LCD segment turns opaque/dark when
-    // energized, not bright). shade (0..3) now selects one of FOUR
-    // pre-blended paper->ink levels instead of a plain binary mux, so a
-    // segment's persistence accumulator renders as visible gray traces
-    // while it rises/decays instead of popping instantaneously.
-    localparam [7:0] BG_R = 8'hC8, BG_G = 8'hD4, BG_B = 8'hB4; // shade 0 (paper)
-    localparam [7:0] FG_R = 8'h18, FG_G = 8'h20, FG_B = 8'h18; // shade 3 (full ink)
-    // The two intermediate levels are elaboration-time constants (plain
-    // constant-folded division, not a per-pixel multiplier/divider) --
-    // shade 1 = paper blended 1/3 toward ink, shade 2 = 2/3 toward ink.
+    // background (a real TN LCD segment turns opaque/dark when energized,
+    // not bright). level (0..4) selects one of FIVE pre-blended paper->ink
+    // colors, so the persistence accumulator renders as visible gray
+    // traces and the optional ghost outline as a faint tint.
+    localparam [7:0] BG_R = 8'hC8, BG_G = 8'hD4, BG_B = 8'hB4; // level 0 (paper)
+    localparam [7:0] FG_R = 8'h18, FG_G = 8'h20, FG_B = 8'h18; // level 4 (full ink)
+    // Intermediate colors are elaboration-time constants (plain
+    // constant-folded division, no per-pixel multiplier/divider). Ghost
+    // (level 1) = paper blended ~10% toward ink -- just enough to see the
+    // dormant segment; MID1 (level 2) = 1/3, MID2 (level 3) = 2/3.
+    localparam [7:0] GH_R   = BG_R - (BG_R - FG_R) / 10;
+    localparam [7:0] GH_G   = BG_G - (BG_G - FG_G) / 10;
+    localparam [7:0] GH_B   = BG_B - (BG_B - FG_B) / 10;
     localparam [7:0] MID1_R = BG_R - (BG_R - FG_R) / 3;
     localparam [7:0] MID1_G = BG_G - (BG_G - FG_G) / 3;
     localparam [7:0] MID1_B = BG_B - (BG_B - FG_B) / 3;
@@ -452,12 +483,12 @@ module ht943_lcd #(
     localparam [7:0] MID2_G = BG_G - 2 * (BG_G - FG_G) / 3;
     localparam [7:0] MID2_B = BG_B - 2 * (BG_B - FG_B) / 3;
 
-    wire [7:0] shade_r = (shade == 2'd0) ? BG_R : (shade == 2'd1) ? MID1_R :
-                         (shade == 2'd2) ? MID2_R : FG_R;
-    wire [7:0] shade_g = (shade == 2'd0) ? BG_G : (shade == 2'd1) ? MID1_G :
-                         (shade == 2'd2) ? MID2_G : FG_G;
-    wire [7:0] shade_b = (shade == 2'd0) ? BG_B : (shade == 2'd1) ? MID1_B :
-                         (shade == 2'd2) ? MID2_B : FG_B;
+    wire [7:0] shade_r = (level == 3'd0) ? BG_R   : (level == 3'd1) ? GH_R :
+                         (level == 3'd2) ? MID1_R : (level == 3'd3) ? MID2_R : FG_R;
+    wire [7:0] shade_g = (level == 3'd0) ? BG_G   : (level == 3'd1) ? GH_G :
+                         (level == 3'd2) ? MID1_G : (level == 3'd3) ? MID2_G : FG_G;
+    wire [7:0] shade_b = (level == 3'd0) ? BG_B   : (level == 3'd1) ? GH_B :
+                         (level == 3'd2) ? MID1_B : (level == 3'd3) ? MID2_B : FG_B;
 
     assign R = !d_active[2] ? 8'h00 : shade_r;
     assign G = !d_active[2] ? 8'h00 : shade_g;
