@@ -228,15 +228,6 @@ end
 // require in-order declaration for a continuous assign to reference it.
 wire reset = RESET | status[0] | buttons[1] | download_reset | btn_reset;
 
-// hard_reset: the same sources as `reset` MINUS download_reset — i.e. a
-// genuine user/power-up reset, not the automatic reset any .bin/.sro/.pak
-// download applies to itself. pak_loaded (CONFIGURATION below) is cleared
-// only by hard_reset: a plain .bin load re-running CRC autodetect must
-// NOT clobber a previously-loaded pak's config (plan-device-packs.md step
-// 3's ordering rule), which it would if pak_loaded cleared on every
-// download_reset pulse too.
-wire hard_reset = RESET | status[0] | buttons[1] | btn_reset;
-
 ///////////////////////   ROM / SROM DOWNLOAD   //////////////////
 
 wire        core_rom_wr, core_srom_wr, core_spd_wr, core_fx_wr;
@@ -288,7 +279,12 @@ reg [7:0]  pak_data;
 
 always @(posedge clk_sys) begin
 	pak_wr <= 0;
-	if (ioctl_download & ioctl_wr & (ioctl_index[5:0] == 6'd3)) begin
+	// Upper bound before truncating to 17 bits: an oversized (wrong)
+	// file would otherwise wrap pak_addr back through the section
+	// ranges — and could even land on addr == PACK_SIZE-1 again,
+	// pulsing done and latching pak_loaded over garbage tables.
+	if (ioctl_download & ioctl_wr & (ioctl_index[5:0] == 6'd3)
+	    & (ioctl_addr < 27'd72616)) begin
 		pak_wr   <= 1;
 		pak_addr <= ioctl_addr[16:0];
 		pak_data <= ioctl_dout;
@@ -364,10 +360,15 @@ wire [1:0] profile_sel = (status[8:6] == 3'd0) ? detected_profile
 // textual order, so nonblocking-assignment semantics make the SECOND
 // block's writes the ones that stick — see the comment on pak_done for
 // why both can fire on the exact same cycle). Once a pak has loaded,
-// pak_loaded stays set — suppressing (a) entirely — until hard_reset
-// (see RESET above): a later .bin load's CRC autodetect must not clobber
-// a previously-loaded pak's config, but a genuine user/power-on reset
-// does let CRC autodetect take over again.
+// pak_loaded stays set — suppressing (a) entirely — until the CORE is
+// reloaded. It deliberately survives OSD Reset / user-button resets too:
+// the LCD face tables in ht943_lcd are RAM whose $readmemh E88 seed can
+// only be restored by reconfiguring the FPGA, so if a reset re-armed
+// CRC autodetect while a pak face was loaded, an unknown-CRC .bin (the
+// whole point of packs) would snap cfg_* back to E88's clocks/jmaps
+// under the pak's face — a silent mismatch (Opus review finding M2).
+// Config and face therefore share one lifetime: the pak's, until the
+// next pak or core reload.
 //
 // Port pullup values are deliberately not part of this sequence — see
 // ht943_core.sv's comment on PP/PM/PS_PULLUP for why they're compile-
@@ -387,17 +388,15 @@ reg  [7:0] cfg_fx  [0:15];
 reg  [8:0] cfg_frame_x0, cfg_frame_x1;
 reg  [9:0] cfg_frame_y0, cfg_frame_y1;
 
-// Cleared only by hard_reset (see RESET above); set once a pak finishes
-// loading. Gates whether (a)'s fallback latch below is allowed to run.
-reg        pak_loaded;
+// Set once a pak finishes loading; never cleared (see the lifetime
+// comment above). Gates whether (a)'s fallback latch is allowed to run.
+reg        pak_loaded = 0;
 
 localparam CFG_WORDS = 39; // 7 config + 16 speed + 16 effect
 
 integer cfg_i; // elaboration-time unroll index for the spd/fx for-loops below
 
 always @(posedge clk_sys) begin
-	if (hard_reset) pak_loaded <= 0;
-
 	if (reset) begin
 		cfg_active <= 1;
 		cfg_idx    <= 0;

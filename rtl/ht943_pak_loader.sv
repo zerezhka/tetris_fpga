@@ -99,6 +99,15 @@ module ht943_pak_loader (
     wire in_geotab = (addr >= GEOTAB_OFF) && (addr < PIXMAP_OFF);
     wire in_pixmap = (addr >= PIXMAP_OFF) && (addr < PACK_SIZE);
 
+    // Magic check: writes (and `done`) are disabled for the rest of the
+    // stream unless bytes 0..3 spell "HTPK". A wrong file picked via F3
+    // then leaves both the face RAM and cfg_* untouched instead of
+    // filling them with garbage that only a valid re-load could fix.
+    // Byte 0 assigns (not ORs) magic_bad, so a good pak after a bad one
+    // re-arms cleanly. Bytes stream strictly in order, so magic_bad is
+    // settled long before the first section byte at addr 32.
+    logic magic_bad = 1'b0;
+
     // A one-byte low-half latch shared by every 2-byte little-endian
     // field in this module (config/frame/segtab/pixmap all consume it
     // the same way: even byte -> latch low, odd byte -> commit
@@ -164,7 +173,14 @@ module ht943_pak_loader (
         // mutually exclusively. rst only clears the idle byte-lane state
         // when no byte is arriving this cycle.
         if (wr) begin
-            if (in_config) begin
+            if      (addr == 17'd0) magic_bad <= (data != "H");
+            else if (addr == 17'd1) magic_bad <= magic_bad | (data != "T");
+            else if (addr == 17'd2) magic_bad <= magic_bad | (data != "P");
+            else if (addr == 17'd3) magic_bad <= magic_bad | (data != "K");
+
+            if (magic_bad) begin
+                // swallow the rest of a non-pak stream
+            end else if (in_config) begin
                 if (in_jmap) begin
                     // Parity within the jmap sub-range, NOT coff's global
                     // parity: jmap starts at coff==11 (odd), so using
