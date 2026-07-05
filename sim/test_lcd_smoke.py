@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Self-checking driver for sim/tb_ht943_lcd_smoke.cpp (plan-device-packs.md
-step 2). Not part of sim/regression.py's CASES — like the smoke test
-itself, this is a one-off sanity check with no bit-exact CPU-trace
-reference to diff against (see tb_ht943_lcd_smoke.cpp's header), run
-manually alongside the pak_loader test and the full regression.
+step 2). Wired into sim/regression.py's CASES (Opus review finding M1):
+there's no bit-exact CPU-trace reference to diff against (see
+tb_ht943_lcd_smoke.cpp's header), but the fallback==E88-pak assertion is
+the only automated proof that the no-pak power-on face is intact.
 
 Builds rtl/ht943_lcd.sv and rtl/ht943_pak_loader.sv as two separate
 Verilated libraries (they're independent top modules, linked together in

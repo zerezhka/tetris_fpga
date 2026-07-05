@@ -164,6 +164,14 @@ CASES = [
     # cross-check against rtl/ht943_profiles.svh and rtl/assets/*.hex —
     # see tools/gen_device_pack.py / sim/test_device_pack.py.
     ('Device-pack roundtrip (all 4 profiles)', device_pack_case),
+    # The RTL side of the pak pipeline. These are the only tests that
+    # catch the hardcoded section offsets in ht943_pak_loader.sv drifting
+    # from gen_device_pack.py (they live redundantly in both files), so
+    # they MUST stay in regression (Opus review finding M1).
+    ('Pak-loader RTL unpack (Verilator, all 4 paks)',
+     lambda: script_case('test_pak_loader.py')),
+    ('LCD smoke: power-on fallback == E88 pak render',
+     lambda: script_case('test_lcd_smoke.py')),
     ('E23PlusMarkII96in1 (fetch/decode/execute)', lambda: real_rom_case('E23PlusMarkII96in1')),
     ('E88_8in1 (fetch/decode/execute)', lambda: real_rom_case('E88_8in1')),
     ('GA888 (fetch/decode/execute)', lambda: real_rom_case('GA888')),
