@@ -150,15 +150,15 @@ pll pll
 );
 
 // CPU clock enable: the core retires one instruction per enabled clock.
-// clk_sys is 50 MHz; target rates (PROFILE_CLK_DIV, from each ROM's real
-// .brick "clock") are selected by profile_sel (OSD selector / ROM-CRC
-// autodetect — see PROFILE AUTODETECT) via rtl/ht943_profiles.svh.
+// clk_sys is 50 MHz; target rate is cfg_clk_div (CONFIGURATION below) —
+// the CRC-autodetect fallback (rtl/ht943_profiles.svh's PROFILE_CLK_DIV)
+// or a loaded pak's override, whichever is current.
 reg [7:0] cpu_ce_div;
 reg       cpu_ce;
 reg [7:0] cpu_ce_target;
 wire [3:0] cpu_cycles; // per-instruction osc-cycle count from the core
 
-always @(posedge clk_sys) cpu_ce_target <= PROFILE_CLK_DIV[profile_sel][7:0];
+always @(posedge clk_sys) cpu_ce_target <= cfg_clk_div[7:0];
 
 // ce is suppressed during reset AND the 39-cycle profile-config load that
 // follows it (cfg_active below): cpu_ce_div free-ran through reset before,
@@ -227,6 +227,15 @@ end
 // MAPPING below) is declared later in the file; SystemVerilog doesn't
 // require in-order declaration for a continuous assign to reference it.
 wire reset = RESET | status[0] | buttons[1] | download_reset | btn_reset;
+
+// hard_reset: the same sources as `reset` MINUS download_reset — i.e. a
+// genuine user/power-up reset, not the automatic reset any .bin/.sro/.pak
+// download applies to itself. pak_loaded (CONFIGURATION below) is cleared
+// only by hard_reset: a plain .bin load re-running CRC autodetect must
+// NOT clobber a previously-loaded pak's config (plan-device-packs.md step
+// 3's ordering rule), which it would if pak_loaded cleared on every
+// download_reset pulse too.
+wire hard_reset = RESET | status[0] | buttons[1] | btn_reset;
 
 ///////////////////////   ROM / SROM DOWNLOAD   //////////////////
 
@@ -320,9 +329,11 @@ always @(posedge clk_sys) begin
 		rom_crc <= crc32_byte((ioctl_addr == 0) ? 32'hFFFFFFFF : rom_crc,
 		                      ioctl_dout);
 	// Compare on the download's falling edge. download_reset holds the
-	// core in reset for ~100ms after this, and cfg_profile keeps
-	// re-latching profile_sel for as long as reset is held, so the
-	// detected profile is always the one the post-download reset applies.
+	// core in reset for ~100ms after this, and the CONFIGURATION section's
+	// fallback branch keeps re-latching profile_sel for as long as reset
+	// is held (when no pak has been loaded — see pak_loaded there), so
+	// the detected profile is always the one the post-download reset
+	// applies.
 	if (rom_download_prev && !rom_download)
 		detected_profile <=
 			(rom_crc_final == PROFILE_ROM_CRC32[1]) ? 2'd1 :
@@ -337,52 +348,137 @@ wire [1:0] profile_sel = (status[8:6] == 3'd0) ? detected_profile
 
 ///////////////////////   CONFIGURATION   ////////////////////////
 
-// Program the core's runtime parameters once after reset, from whichever
-// profile profile_sel picks (OSD forced value or ROM-CRC autodetect;
-// tables generated from
-// the real .brick config of each of the 4 verified ROMs — see
-// tools/gen_mister_profiles.py). cfg_profile latches the profile actually
-// being loaded, so button mapping and sound tables stay consistent even
-// if the OSD selector changes again before this device's next reset.
+// Every runtime device parameter (clock/timer/wakeup masks, button jmaps,
+// sound tables, LCD well-frame rect) is now a plain register with TWO
+// sources (plan-device-packs.md step 3):
+//
+//   (a) fallback: latched from the PROFILE_* arrays (rtl/ht943_profiles.svh,
+//       tools/gen_mister_profiles.py) by profile_sel — the OSD-forced
+//       value or ROM-CRC autodetect result — exactly the compile-time
+//       behavior this replaces, unchanged when no pak has ever loaded;
+//   (b) override: latched from ht943_pak_loader's cfg_* outputs (PAK
+//       LOADER below) when a .pak finishes streaming (pak_done).
+//
+// Ordering: pak_done's override always wins over a same-cycle fallback
+// latch (the two `always` blocks below assign the same variables, in this
+// textual order, so nonblocking-assignment semantics make the SECOND
+// block's writes the ones that stick — see the comment on pak_done for
+// why both can fire on the exact same cycle). Once a pak has loaded,
+// pak_loaded stays set — suppressing (a) entirely — until hard_reset
+// (see RESET above): a later .bin load's CRC autodetect must not clobber
+// a previously-loaded pak's config, but a genuine user/power-on reset
+// does let CRC autodetect take over again.
+//
 // Port pullup values are deliberately not part of this sequence — see
 // ht943_core.sv's comment on PP/PM/PS_PULLUP for why they're compile-
 // time-only (nothing reads a runtime override at all).
 reg        cfg_active;
 reg  [5:0] cfg_idx;
+reg [15:0] cfg_clk_div;
 reg [15:0] cfg_timer_div;
 reg  [3:0] cfg_pp_wakeup, cfg_pm_wakeup, cfg_ps_wakeup;
 reg [15:0] cfg_sound_freq_div;
-reg  [1:0] cfg_profile;
-
-// Well-frame rect fed to ht943_lcd (that module no longer carries its own
-// per-profile PROFILE_FRAME_* mux — see its header comment). Step 3 layers
-// a pak-config override on top of this fallback latch, same as the other
-// cfg_* registers above.
+reg [11:0] cfg_reset_jmap;
+reg [11:0] cfg_pp_jmap [0:3];
+reg [11:0] cfg_pm_jmap [0:3];
+reg [11:0] cfg_ps_jmap [0:3];
+reg  [7:0] cfg_spd [0:15];
+reg  [7:0] cfg_fx  [0:15];
 reg  [8:0] cfg_frame_x0, cfg_frame_x1;
 reg  [9:0] cfg_frame_y0, cfg_frame_y1;
 
+// Cleared only by hard_reset (see RESET above); set once a pak finishes
+// loading. Gates whether (a)'s fallback latch below is allowed to run.
+reg        pak_loaded;
+
 localparam CFG_WORDS = 39; // 7 config + 16 speed + 16 effect
 
+integer cfg_i; // elaboration-time unroll index for the spd/fx for-loops below
+
 always @(posedge clk_sys) begin
+	if (hard_reset) pak_loaded <= 0;
+
 	if (reset) begin
 		cfg_active <= 1;
 		cfg_idx    <= 0;
-		cfg_profile <= profile_sel;
 
-		cfg_timer_div      <= PROFILE_TIMER_DIV[profile_sel];
-		cfg_pp_wakeup      <= PROFILE_PP_WAKEUP[profile_sel];
-		cfg_pm_wakeup      <= PROFILE_PM_WAKEUP[profile_sel];
-		cfg_ps_wakeup      <= PROFILE_PS_WAKEUP[profile_sel];
-		cfg_sound_freq_div <= PROFILE_SOUND_FREQ_DIV[profile_sel];
+		if (!pak_loaded) begin
+			cfg_clk_div        <= 16'(PROFILE_CLK_DIV[profile_sel]);
+			cfg_timer_div      <= PROFILE_TIMER_DIV[profile_sel];
+			cfg_pp_wakeup      <= PROFILE_PP_WAKEUP[profile_sel];
+			cfg_pm_wakeup      <= PROFILE_PM_WAKEUP[profile_sel];
+			cfg_ps_wakeup      <= PROFILE_PS_WAKEUP[profile_sel];
+			cfg_sound_freq_div <= PROFILE_SOUND_FREQ_DIV[profile_sel];
+			cfg_reset_jmap     <= PROFILE_RESET_JMAP[profile_sel];
 
-		cfg_frame_x0 <= PROFILE_FRAME_X0[profile_sel];
-		cfg_frame_y0 <= PROFILE_FRAME_Y0[profile_sel];
-		cfg_frame_x1 <= PROFILE_FRAME_X1[profile_sel];
-		cfg_frame_y1 <= PROFILE_FRAME_Y1[profile_sel];
+			cfg_pp_jmap[0] <= PROFILE_PP_JMAP[profile_sel][0];
+			cfg_pp_jmap[1] <= PROFILE_PP_JMAP[profile_sel][1];
+			cfg_pp_jmap[2] <= PROFILE_PP_JMAP[profile_sel][2];
+			cfg_pp_jmap[3] <= PROFILE_PP_JMAP[profile_sel][3];
+			cfg_pm_jmap[0] <= PROFILE_PM_JMAP[profile_sel][0];
+			cfg_pm_jmap[1] <= PROFILE_PM_JMAP[profile_sel][1];
+			cfg_pm_jmap[2] <= PROFILE_PM_JMAP[profile_sel][2];
+			cfg_pm_jmap[3] <= PROFILE_PM_JMAP[profile_sel][3];
+			cfg_ps_jmap[0] <= PROFILE_PS_JMAP[profile_sel][0];
+			cfg_ps_jmap[1] <= PROFILE_PS_JMAP[profile_sel][1];
+			cfg_ps_jmap[2] <= PROFILE_PS_JMAP[profile_sel][2];
+			cfg_ps_jmap[3] <= PROFILE_PS_JMAP[profile_sel][3];
+
+			for (cfg_i = 0; cfg_i < 16; cfg_i = cfg_i + 1) begin
+				cfg_spd[cfg_i] <= PROFILE_SPD[profile_sel][cfg_i];
+				cfg_fx[cfg_i]  <= PROFILE_FX[profile_sel][cfg_i];
+			end
+
+			cfg_frame_x0 <= PROFILE_FRAME_X0[profile_sel];
+			cfg_frame_y0 <= PROFILE_FRAME_Y0[profile_sel];
+			cfg_frame_x1 <= PROFILE_FRAME_X1[profile_sel];
+			cfg_frame_y1 <= PROFILE_FRAME_Y1[profile_sel];
+		end
 	end else if (cfg_active) begin
 		if (cfg_idx == CFG_WORDS - 1)
 			cfg_active <= 0;
 		cfg_idx <= cfg_idx + 1'd1;
+	end
+
+	// Pak config override — see PAK LOADER below for pak_done. NOT gated
+	// on `reset`/`!reset`: pak_done can pulse while download_reset is
+	// still asserted (the tail of the pak's own download), the same
+	// cycle the (a) fallback branch above may also fire; textually
+	// following it here makes this block's writes win, which is exactly
+	// the override behavior wanted.
+	if (pak_done) begin
+		pak_loaded <= 1;
+
+		cfg_clk_div        <= pak_cfg_clk_div;
+		cfg_timer_div      <= pak_cfg_timer_div;
+		cfg_pp_wakeup      <= pak_cfg_pp_wakeup;
+		cfg_pm_wakeup      <= pak_cfg_pm_wakeup;
+		cfg_ps_wakeup      <= pak_cfg_ps_wakeup;
+		cfg_sound_freq_div <= pak_cfg_sound_freq_div;
+		cfg_reset_jmap     <= pak_cfg_reset_jmap;
+
+		cfg_pp_jmap[0] <= pak_cfg_pp_jmap0;
+		cfg_pp_jmap[1] <= pak_cfg_pp_jmap1;
+		cfg_pp_jmap[2] <= pak_cfg_pp_jmap2;
+		cfg_pp_jmap[3] <= pak_cfg_pp_jmap3;
+		cfg_pm_jmap[0] <= pak_cfg_pm_jmap0;
+		cfg_pm_jmap[1] <= pak_cfg_pm_jmap1;
+		cfg_pm_jmap[2] <= pak_cfg_pm_jmap2;
+		cfg_pm_jmap[3] <= pak_cfg_pm_jmap3;
+		cfg_ps_jmap[0] <= pak_cfg_ps_jmap0;
+		cfg_ps_jmap[1] <= pak_cfg_ps_jmap1;
+		cfg_ps_jmap[2] <= pak_cfg_ps_jmap2;
+		cfg_ps_jmap[3] <= pak_cfg_ps_jmap3;
+
+		for (cfg_i = 0; cfg_i < 16; cfg_i = cfg_i + 1) begin
+			cfg_spd[cfg_i] <= pak_cfg_spd[cfg_i];
+			cfg_fx[cfg_i]  <= pak_cfg_fx[cfg_i];
+		end
+
+		cfg_frame_x0 <= pak_cfg_frame_x0;
+		cfg_frame_y0 <= pak_cfg_frame_y0;
+		cfg_frame_x1 <= pak_cfg_frame_x1;
+		cfg_frame_y1 <= pak_cfg_frame_y1;
 	end
 end
 
@@ -409,11 +505,11 @@ assign core_cfg_data =
 // entry has been written regardless of order.
 assign core_spd_wr   = cfg_active & (cfg_idx >= 7) & (cfg_idx < 23);
 assign core_spd_addr = cfg_idx[3:0];
-assign core_spd_data = PROFILE_SPD[cfg_profile][cfg_idx[3:0]];
+assign core_spd_data = cfg_spd[cfg_idx[3:0]];
 
 assign core_fx_wr    = cfg_active & (cfg_idx >= 23) & (cfg_idx < 39);
 assign core_fx_addr  = cfg_idx[3:0];
-assign core_fx_data  = PROFILE_FX[cfg_profile][cfg_idx[3:0]];
+assign core_fx_data  = cfg_fx[cfg_idx[3:0]];
 
 ///////////////////////   INPUT MAPPING   ////////////////////////
 
@@ -426,31 +522,31 @@ assign core_fx_data  = PROFILE_FX[cfg_profile][cfg_idx[3:0]];
 
 wire [11:0] joy = joystick_0[11:0];
 
-wire [3:0] pp_in = ~{|(PROFILE_PP_JMAP[cfg_profile][3] & joy),
-                     |(PROFILE_PP_JMAP[cfg_profile][2] & joy),
-                     |(PROFILE_PP_JMAP[cfg_profile][1] & joy),
-                     |(PROFILE_PP_JMAP[cfg_profile][0] & joy)};
-wire [3:0] pm_in = ~{|(PROFILE_PM_JMAP[cfg_profile][3] & joy),
-                     |(PROFILE_PM_JMAP[cfg_profile][2] & joy),
-                     |(PROFILE_PM_JMAP[cfg_profile][1] & joy),
-                     |(PROFILE_PM_JMAP[cfg_profile][0] & joy)};
-wire [3:0] ps_in = ~{|(PROFILE_PS_JMAP[cfg_profile][3] & joy),
-                     |(PROFILE_PS_JMAP[cfg_profile][2] & joy),
-                     |(PROFILE_PS_JMAP[cfg_profile][1] & joy),
-                     |(PROFILE_PS_JMAP[cfg_profile][0] & joy)};
+wire [3:0] pp_in = ~{|(cfg_pp_jmap[3] & joy),
+                     |(cfg_pp_jmap[2] & joy),
+                     |(cfg_pp_jmap[1] & joy),
+                     |(cfg_pp_jmap[0] & joy)};
+wire [3:0] pm_in = ~{|(cfg_pm_jmap[3] & joy),
+                     |(cfg_pm_jmap[2] & joy),
+                     |(cfg_pm_jmap[1] & joy),
+                     |(cfg_pm_jmap[0] & joy)};
+wire [3:0] ps_in = ~{|(cfg_ps_jmap[3] & joy),
+                     |(cfg_ps_jmap[2] & joy),
+                     |(cfg_ps_jmap[1] & joy),
+                     |(cfg_ps_jmap[0] & joy)};
 
 // Some profiles model their Reset button as BrickEmuPy's pseudo-port RES
 // (a real _reset() call, not a chip pin) — fold it into the top-level
 // reset instead of a PP/PM/PS bit.
-wire btn_reset = |(PROFILE_RESET_JMAP[cfg_profile] & joy);
+wire btn_reset = |(cfg_reset_jmap & joy);
 
 ///////////////////////   PAK LOADER   /////////////////////////////
 
-// Unpacks a streamed .pak (see PAK DOWNLOAD above / rtl/gen_device_pack.py)
-// into ht943_lcd's table write ports and a set of config outputs. Step 3
-// latches pak_cfg_* into the cfg_* registers above (with pak_loaded
-// override-ordering); for now only the LCD table writes are live — the
-// config side of the interface exists but isn't consumed yet.
+// Unpacks a streamed .pak (see PAK DOWNLOAD above / tools/gen_device_pack.py)
+// into ht943_lcd's table write ports and a set of config outputs. The
+// CONFIGURATION section above latches pak_cfg_* into the cfg_* registers
+// when `done` pulses, with pak_loaded override-ordering over the
+// CRC-autodetect fallback.
 wire        pak_pixmap_wr;
 wire [15:0] pak_pixmap_waddr;
 wire [9:0]  pak_pixmap_wdata;
@@ -607,7 +703,7 @@ ht943_audio #(.CLK_RATE(50000000)) ht943_audio
 	.snd_tick(cpu_snd_tick),
 	.snd_tick_note(cpu_snd_tick_note),
 	.freq_div(cfg_sound_freq_div),
-	.clk_per_cpu_tick(16'(PROFILE_CLK_DIV[cfg_profile]) + 16'd1),
+	.clk_per_cpu_tick(cfg_clk_div + 16'd1),
 	.sample(audio_sample),
 	.sample_ce(audio_sample_ce)
 );
