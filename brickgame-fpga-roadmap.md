@@ -510,6 +510,17 @@ python main.py
 
 ---
 
+## 6.5 Next big rework: loadable device packs
+
+See `plan-device-packs.md` — faces + device profiles move out of the
+bitstream into per-device `.pak` files streamed from Linux via ioctl
+(third F-entry). Kills the M10K ceiling, makes new devices (E23, GA888,
+future dumps) pure data, one bitstream forever. The post-pack queue
+(sound listen-test, FC flag, NEXT-cell polish, savestates) lives there
+too.
+
+---
+
 ## 7. Experiment idea: homebrew ROM ("canonical tetris")
 
 Write an own game ROM for the core — the full dev loop already exists in
