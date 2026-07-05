@@ -55,11 +55,28 @@
 // S2 seg+geo tables -> S3 CPU-RAM read + brick compare -> registered
 // RGB. Sync/blank/ce are delayed 3 cycles to match; the whole output
 // stream is uniformly shifted, which the video chain doesn't notice.
+//
+// LCD persistence ("ghosting"): a real passive-matrix LCD segment takes
+// ~100-250ms to fully switch, so anything the firmware lights only
+// briefly (a moving shot, a blinking icon) shows as a fading gray trace
+// rather than popping instantaneously. Modeled with a 4-bit accumulator
+// per segment (accram, 512 entries) that a small FSM nudges up/down by
+// RISE/FALL once per frame during vblank (see the FSM's comment below);
+// the render pipeline's `shape_mask` (unchanged brick/cell geometry)
+// still decides WHERE ink goes, but HOW DARK now comes from the
+// accumulator's top 2 bits (`shade`, 0..3) instead of the old 1-bit dark.
 
 module ht943_lcd #(
     parameter int H_VISIBLE = 360,
     parameter int V_VISIBLE = 840,
-    parameter int SCALE     = 3
+    parameter int SCALE     = 3,
+    // Persistence ("ghosting") ramp rates for the per-segment accumulator
+    // below: RISE=2/frame reaches full (15) in ~8 frames when a segment
+    // lights up; FALL=1/frame fades to 0 in ~15 frames once it goes dark.
+    // Tune-friendly module parameters, not hardcoded — real passive-matrix
+    // LCDs settle in ~100-250ms (roughly 6-15 frames at ~59.5Hz).
+    parameter int RISE      = 2,
+    parameter int FALL      = 1
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -187,6 +204,13 @@ module ht943_lcd #(
     // infer a single >32-bit-wide RAM — see the module header comment.
     logic [31:0] geotab_lo [0:511];
     logic [21:0] geotab_hi [0:511];
+    // ---- per-segment persistence ("ghosting") accumulator, 4-bit, 512
+    // entries: one write port (the update FSM below), one read port (the
+    // render pipeline, S2-aligned like segtab/geotab). No $readmemh init
+    // needed -- Cyclone V M10K powers up to 0, matching a cold, fully-dark
+    // LCD, and a few frames' settling before the fallback face is visible
+    // is fine (see the update-FSM comment for the ramp timing).
+    logic [3:0] accram [0:511];
 
     initial begin
         $readmemh("rtl/assets/E88_8in1_pix.hex", pixmap);
@@ -221,6 +245,11 @@ module ht943_lcd #(
     always @(posedge clk) begin
         if (geotab_wr) geotab_hi[geotab_waddr] <= geotab_wdata_hi;
     end
+    // accram's single write port -- driven only by the persistence update
+    // FSM below (upd_wr/upd_widx/acc_new), never by the pak loader.
+    always @(posedge clk) begin
+        if (upd_wr) accram[upd_widx] <= acc_new;
+    end
 
     // ---- S0: coarse map address ----
     // Row-major index, matching the extractor's y*cw+x write order.
@@ -235,14 +264,68 @@ module ht943_lcd #(
     wire       s1_bg  = pix_word[9];
     wire [8:0] s1_idx = pix_word[8:0];
 
+    // ---- persistence update FSM: once per frame, on vsync's rising edge,
+    // walk every segment index 0..511 during vertical blank (the renderer
+    // is idle then) and nudge its accumulator toward full or empty
+    // depending on whether the segment is currently lit. This must NOT add
+    // a second reader to segtab (or, transitively, the CPU RAM read port
+    // below): in_vblank_update multiplexes the SAME segtab/accram read
+    // address between the render pipeline's s1_idx and the FSM's own walk
+    // index, so there is still exactly one reader of each.
+    reg        vsync_prev;
+    reg        upd_active;   // walking now (address bus driven by upd_idx)
+    reg [8:0]  upd_idx;      // 0..511, the index currently being addressed
+    reg        upd_idx_v;    // seg_word/acc_word this cycle are FSM data
+    reg [8:0]  upd_widx;     // ...for THIS index (delayed 1 from upd_idx)
+
+    wire in_vblank_update = upd_active;
+    wire [8:0] seg_idx = in_vblank_update ? upd_idx : s1_idx;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            vsync_prev <= 0;
+            upd_active <= 0;
+            upd_idx    <= 0;
+            upd_idx_v  <= 0;
+            upd_widx   <= 0;
+        end else begin
+            vsync_prev <= vsync_raw;
+            if (!vsync_prev && vsync_raw && !upd_active) begin
+                // Start a fresh walk. Guarded by !upd_active so a walk that
+                // (should never, but defensively) overruns one vsync period
+                // isn't restarted mid-stream.
+                upd_active <= 1;
+                upd_idx    <= 0;
+            end else if (upd_active) begin
+                if (upd_idx == 9'd511) upd_active <= 0;
+                else                   upd_idx    <= upd_idx + 1'd1;
+            end
+            upd_idx_v <= upd_active;
+            upd_widx  <= upd_idx;
+        end
+    end
+
     // ---- S2: segment tables (registered BRAM reads, one dedicated
-    // block each) ----
+    // block each). segtab and accram are addressed by the shared seg_idx
+    // mux above; geotab stays on the render pipeline's own s1_idx (the
+    // update FSM has no use for geometry). ----
     logic [9:0]  seg_word;
     logic [31:0] geo_lo;
     logic [21:0] geo_hi;
-    always @(posedge clk) seg_word <= segtab[s1_idx];
+    logic [3:0]  acc_word;
+    always @(posedge clk) seg_word <= segtab[seg_idx];
     always @(posedge clk) geo_lo   <= geotab_lo[s1_idx];
     always @(posedge clk) geo_hi   <= geotab_hi[s1_idx];
+    always @(posedge clk) acc_word <= accram[seg_idx];
+
+    // Persistence step: acc_word is the OLD value for upd_widx (both valid
+    // the same cycle, 1 cycle after upd_idx addressed them); seg_lit below
+    // reads that same cycle's seg_word/ram_data. Clamped 4-bit ramp, no
+    // per-pixel multiply -- just a compare-and-add/subtract.
+    wire       upd_wr  = upd_idx_v;
+    wire [4:0] acc_up   = {1'b0, acc_word} + 5'(RISE);
+    wire [3:0] acc_new  = seg_lit ? (acc_up > 5'd15 ? 4'd15 : acc_up[3:0])
+                                  : (acc_word >= 4'(FALL) ? acc_word - 4'(FALL) : 4'd0);
 
     wire [53:0] geo_word = {geo_hi, geo_lo};
 
@@ -277,7 +360,11 @@ module ht943_lcd #(
 
     assign ram_addr = seg_word[9:2];
     wire [1:0] seg_bit = seg_word[1:0];
-    wire lit_state = !bg2 && ram_data[seg_bit];
+    // Raw "is the segment currently addressed by seg_word ON" -- generic
+    // over both users of the shared seg_idx mux: the persistence update
+    // FSM (walking real segment indices during vblank, where the bg
+    // sentinel doesn't apply) and, gated by bg2 below, the render pipeline.
+    wire seg_lit = ram_data[seg_bit];
 
     // Brick geometry, evaluated at hi-res: dark iff inside the bbox AND
     // (on the frame OR in the inner fill); the gap ring and anything the
@@ -310,13 +397,25 @@ module ht943_lcd #(
                     ({1'b0, hy2} <  {1'b0, frame_y1} - FT);
     wire frame_hit = (frame_x0 != frame_x1) && fr_outer && !fr_inner;
 
+    // shape_mask: WHERE ink can go within this segment's cell (unchanged
+    // from the old binary renderer's geometry) -- brick segments only ink
+    // the frame ring / inner fill, everything else inks its whole coarse
+    // cell. HOW DARK is now entirely the persistence accumulator's job:
+    // acc_shade is the top 2 bits of acc_word, S2-aligned like geo/seg.
+    wire       shape_mask = geo_brick ? brick_dark : 1'b1;
+    wire [1:0] acc_shade  = acc_word[3:2];
+
     // Registered: the S2 outputs (and the combinational RAM read + bbox
     // math on them) are valid 2 cycles after S0; registering here makes
     // the data path a uniform 3 cycles, matching the d_*[2] geometry taps.
-    reg dark;
+    // frame_hit is bezel PRINT (not LCD) -- always full shade. Background
+    // pixels are always shade 0. Everything else is shade 0 outside its
+    // shape_mask, else the segment's own persistence accumulator.
+    reg [1:0] shade;
     always @(posedge clk)
-        dark <= frame_hit ||
-                (lit_state && (geo_brick ? brick_dark : 1'b1));
+        shade <= frame_hit ? 2'd3 :
+                 bg2       ? 2'd0 :
+                 shape_mask ? acc_shade : 2'd0;
 
     // ---- output stage: geometry delayed 3 cycles to match the data ----
     reg [2:0] d_hsync, d_vsync, d_hblank, d_vblank, d_active, d_ce;
@@ -337,12 +436,31 @@ module ht943_lcd #(
 
     // Reflective LCD look: segments read dark against a pale panel
     // background (a real TN LCD segment turns opaque/dark when
-    // energized, not bright).
-    localparam [7:0] BG_R = 8'hC8, BG_G = 8'hD4, BG_B = 8'hB4;
-    localparam [7:0] FG_R = 8'h18, FG_G = 8'h20, FG_B = 8'h18;
+    // energized, not bright). shade (0..3) now selects one of FOUR
+    // pre-blended paper->ink levels instead of a plain binary mux, so a
+    // segment's persistence accumulator renders as visible gray traces
+    // while it rises/decays instead of popping instantaneously.
+    localparam [7:0] BG_R = 8'hC8, BG_G = 8'hD4, BG_B = 8'hB4; // shade 0 (paper)
+    localparam [7:0] FG_R = 8'h18, FG_G = 8'h20, FG_B = 8'h18; // shade 3 (full ink)
+    // The two intermediate levels are elaboration-time constants (plain
+    // constant-folded division, not a per-pixel multiplier/divider) --
+    // shade 1 = paper blended 1/3 toward ink, shade 2 = 2/3 toward ink.
+    localparam [7:0] MID1_R = BG_R - (BG_R - FG_R) / 3;
+    localparam [7:0] MID1_G = BG_G - (BG_G - FG_G) / 3;
+    localparam [7:0] MID1_B = BG_B - (BG_B - FG_B) / 3;
+    localparam [7:0] MID2_R = BG_R - 2 * (BG_R - FG_R) / 3;
+    localparam [7:0] MID2_G = BG_G - 2 * (BG_G - FG_G) / 3;
+    localparam [7:0] MID2_B = BG_B - 2 * (BG_B - FG_B) / 3;
 
-    assign R = !d_active[2] ? 8'h00 : (dark ? FG_R : BG_R);
-    assign G = !d_active[2] ? 8'h00 : (dark ? FG_G : BG_G);
-    assign B = !d_active[2] ? 8'h00 : (dark ? FG_B : BG_B);
+    wire [7:0] shade_r = (shade == 2'd0) ? BG_R : (shade == 2'd1) ? MID1_R :
+                         (shade == 2'd2) ? MID2_R : FG_R;
+    wire [7:0] shade_g = (shade == 2'd0) ? BG_G : (shade == 2'd1) ? MID1_G :
+                         (shade == 2'd2) ? MID2_G : FG_G;
+    wire [7:0] shade_b = (shade == 2'd0) ? BG_B : (shade == 2'd1) ? MID1_B :
+                         (shade == 2'd2) ? MID2_B : FG_B;
+
+    assign R = !d_active[2] ? 8'h00 : shade_r;
+    assign G = !d_active[2] ? 8'h00 : shade_g;
+    assign B = !d_active[2] ? 8'h00 : shade_b;
 
 endmodule

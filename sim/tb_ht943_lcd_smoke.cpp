@@ -124,15 +124,21 @@ int main(int argc, char** argv) {
     bool frame_captured = false;
     int frames_seen = 0;
     // rst only clears ht943_lcd's h/v scan counters, not its registered
-    // read/compare pipeline (pix_word, seg_word, geo_lo/hi, dark, ...) —
+    // read/compare pipeline (pix_word, seg_word, geo_lo/hi, shade, ...) —
     // those carry whatever was last computed before rst, which after a
     // pak stream can be several complete frames' worth of stale state.
-    // Discard the first post-reset frame entirely and only capture the
-    // second (fully steady-state) one, so a fallback render and an
-    // equivalent pak-loaded render come out byte-identical.
-    const int DISCARD_FRAMES = 1;
+    //
+    // The LCD persistence accumulator (accram) also needs time: it ramps a
+    // lit segment up by RISE=2/frame during each vblank walk, so a
+    // just-lit face renders as blank paper (shade 0) for the first few
+    // frames and only crosses into full ink (accram>=12 -> shade 3) after
+    // ~6 walks. Discard enough frames for every lit segment to SATURATE, so
+    // the captured frame reproduces the old binary render exactly (shade 3
+    // == the former 1-bit `dark`) and a fallback render and an equivalent
+    // pak-loaded render come out byte-identical.
+    const int DISCARD_FRAMES = 8;
     long guard = 0;
-    const long GUARD_MAX = 4L * 480 * 875 * 2 + 1000; // ~4 frames' worth of clk_sys ticks
+    const long GUARD_MAX = 12L * 480 * 875 * 2 + 1000; // ~12 frames' worth of clk_sys ticks
 
     while (!frame_captured && guard++ < GUARD_MAX) {
         int addr = lcd->ram_addr;
