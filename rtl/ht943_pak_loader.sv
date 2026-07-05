@@ -115,6 +115,11 @@ module ht943_pak_loader (
     // so one shared latch is safe.
     logic [7:0] byte_lo;
 
+    // The committed 16-bit little-endian word. A named wire, not an
+    // inline {data, byte_lo}[..:0] slice at each use site: Quartus 17
+    // rejects part-selects applied directly to a concatenation.
+    wire [15:0] le16 = {data, byte_lo};
+
     // Relative offsets are computed as (full-width addr) - (base), THEN
     // truncated to the bit width that section's range fits in — doing it
     // in the other order (truncate addr first, then subtract) would wrap
@@ -190,18 +195,18 @@ module ht943_pak_loader (
                         byte_lo <= data;
                     end else begin
                         unique case ({jmap_port, jmap_entry})
-                            4'b00_00: cfg_pp_jmap0 <= {data, byte_lo}[11:0];
-                            4'b00_01: cfg_pp_jmap1 <= {data, byte_lo}[11:0];
-                            4'b00_10: cfg_pp_jmap2 <= {data, byte_lo}[11:0];
-                            4'b00_11: cfg_pp_jmap3 <= {data, byte_lo}[11:0];
-                            4'b01_00: cfg_pm_jmap0 <= {data, byte_lo}[11:0];
-                            4'b01_01: cfg_pm_jmap1 <= {data, byte_lo}[11:0];
-                            4'b01_10: cfg_pm_jmap2 <= {data, byte_lo}[11:0];
-                            4'b01_11: cfg_pm_jmap3 <= {data, byte_lo}[11:0];
-                            4'b10_00: cfg_ps_jmap0 <= {data, byte_lo}[11:0];
-                            4'b10_01: cfg_ps_jmap1 <= {data, byte_lo}[11:0];
-                            4'b10_10: cfg_ps_jmap2 <= {data, byte_lo}[11:0];
-                            4'b10_11: cfg_ps_jmap3 <= {data, byte_lo}[11:0];
+                            4'b00_00: cfg_pp_jmap0 <= le16[11:0];
+                            4'b00_01: cfg_pp_jmap1 <= le16[11:0];
+                            4'b00_10: cfg_pp_jmap2 <= le16[11:0];
+                            4'b00_11: cfg_pp_jmap3 <= le16[11:0];
+                            4'b01_00: cfg_pm_jmap0 <= le16[11:0];
+                            4'b01_01: cfg_pm_jmap1 <= le16[11:0];
+                            4'b01_10: cfg_pm_jmap2 <= le16[11:0];
+                            4'b01_11: cfg_pm_jmap3 <= le16[11:0];
+                            4'b10_00: cfg_ps_jmap0 <= le16[11:0];
+                            4'b10_01: cfg_ps_jmap1 <= le16[11:0];
+                            4'b10_10: cfg_ps_jmap2 <= le16[11:0];
+                            4'b10_11: cfg_ps_jmap3 <= le16[11:0];
                             default: ;
                         endcase
                     end
@@ -221,20 +226,20 @@ module ht943_pak_loader (
                         8'd7: byte_lo <= data;
                         8'd8: cfg_sound_freq_div <= {data, byte_lo};
                         8'd9: byte_lo <= data;
-                        8'd10: cfg_reset_jmap <= {data, byte_lo}[11:0];
+                        8'd10: cfg_reset_jmap <= le16[11:0];
                         default: ; // reserved config padding
                     endcase
                 end
             end else if (in_frame) begin
                 unique case (foff)
                     3'd0: byte_lo <= data;
-                    3'd1: cfg_frame_x0 <= {data, byte_lo}[8:0];
+                    3'd1: cfg_frame_x0 <= le16[8:0];
                     3'd2: byte_lo <= data;
-                    3'd3: cfg_frame_y0 <= {data, byte_lo}[9:0];
+                    3'd3: cfg_frame_y0 <= le16[9:0];
                     3'd4: byte_lo <= data;
-                    3'd5: cfg_frame_x1 <= {data, byte_lo}[8:0];
+                    3'd5: cfg_frame_x1 <= le16[8:0];
                     3'd6: byte_lo <= data;
-                    3'd7: cfg_frame_y1 <= {data, byte_lo}[9:0];
+                    3'd7: cfg_frame_y1 <= le16[9:0];
                     default: ;
                 endcase
             end else if (in_segtab) begin
@@ -243,7 +248,7 @@ module ht943_pak_loader (
                 end else begin
                     segtab_wr    <= 1;
                     segtab_waddr <= segtab_idx;
-                    segtab_wdata <= {data, byte_lo}[9:0];
+                    segtab_wdata <= le16[9:0];
                 end
             end else if (in_geotab) begin
                 unique case (gbyte)
@@ -274,7 +279,7 @@ module ht943_pak_loader (
                 end else begin
                     pixmap_wr    <= 1;
                     pixmap_waddr <= pixmap_idx;
-                    pixmap_wdata <= {data, byte_lo}[9:0];
+                    pixmap_wdata <= le16[9:0];
                 end
                 if (addr == PACK_SIZE - 1)
                     done <= 1;
