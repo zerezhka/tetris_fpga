@@ -4,16 +4,41 @@
 // segment state (see ht943_core.sv's dbg_ram_addr/dbg_ram_data port and
 // HT943.get_VRAM()). Each ROM's face SVG marks its segments with
 // id="{ramByte}_{ramBit}"; tools/extract_segments_mask.py turns that
-// into three per-profile tables (see its header for the formats):
+// into three tables (see its header for the formats), packed into
+// tools/gen_device_pack.py's .pak format for runtime loading:
 //
-//   *_pix.hex : coarse 120x280 ownership map — bits [8:0] = segment
-//               INDEX, bit 9 = background (out-of-band on purpose:
-//               every in-band code is a legal index).
-//   *_seg.hex : segment index -> packed {ramByte[9:2], ramBit[1:0]}.
-//   *_geo.hex : segment index -> {brick[53], x[52:44], y[43:34],
-//               w[33:25], h[24:16], tx[15:12], ty[11:8], gx[7:4],
-//               gy[3:0]} — bbox in HI-RES (360x840) coordinates plus the
-//               brick's frame/gap thickness measured off the SVG itself.
+//   pixmap : coarse 120x280 ownership map — bits [8:0] = segment
+//            INDEX, bit 9 = background (out-of-band on purpose:
+//            every in-band code is a legal index).
+//   segtab : segment index -> packed {ramByte[9:2], ramBit[1:0]}.
+//   geotab : segment index -> {brick[53], x[52:44], y[43:34],
+//            w[33:25], h[24:16], tx[15:12], ty[11:8], gx[7:4],
+//            gy[3:0]} — bbox in HI-RES (360x840) coordinates plus the
+//            brick's frame/gap thickness measured off the SVG itself.
+//
+// ONE writable copy of each table lives here (plan-device-packs.md step
+// 2): the 4 baked-in per-profile ROM sets + profile mux this module used
+// to carry are gone. $readmemh still seeds the tables with the E88 face
+// at power-on / elaboration — the fallback shown before any .pak is
+// streamed in (or for a bare .bin with no pak at all) — and
+// rtl/ht943_pak_loader.sv's write ports overwrite cells in place once a
+// pak downloads. Because writes land in the SAME address space the
+// readmemh content already occupies, no runtime mux between "fallback"
+// and "loaded" data is needed anywhere in the read path.
+//
+// Quartus-17 RAM inference discipline (see the rom16 saga, git history
+// commit 2d3f44a): each table has exactly one write port (one address,
+// one full-word write per cycle) and its read lives in its own small
+// always_ff of the form `q <= mem[addr];` with no second read expression
+// and no address-independent special-casing. geotab's 54-bit word is
+// split into two separately-NAMED arrays (geotab_lo/geotab_hi), not a
+// genvar array-of-arrays — Quartus has been observed to recombine those
+// wrongly.
+//
+// The well-frame rect (PROFILE_FRAME_* previously) is no longer a
+// profile-indexed table baked in here: it comes in as 4 plain inputs
+// (frame_x0/y0/x1/y1), driven by HT943.sv's cfg_frame_* registers
+// (CRC-autodetect fallback, or pak config override — see HT943.sv).
 //
 // The raster runs at 3x the ownership map (360x840, 25 MHz pixel clock =
 // clk_sys/2, ~59.5 Hz). Non-brick segments (digits, icons) fill their
@@ -22,8 +47,8 @@
 // drawn PROCEDURALLY at full hi-res precision from their exact bbox:
 // outer frame (tx/ty thick), gap (gx/gy), solid inner fill. Every brick
 // is pixel-identical by construction; a straight higher-res pixel map
-// was not an option (4 profiles x 240x560 x 11b already exceeds the
-// whole chip's M10K, let alone 360x840).
+// was not an option (one profile's 240x560 x 11b already approached the
+// whole chip's M10K budget, let alone 360x840).
 //
 // Pipeline (all clk_sys; one pixel = 2 clk_sys, reads are 1-cycle
 // registered BRAM): S0 counters/coarse index -> S1 pixmap word ->
@@ -39,10 +64,32 @@ module ht943_lcd #(
     input  logic        clk,
     input  logic        rst,
 
-    input  logic [1:0]  profile,
     // 1 = "Compressed": disable procedural bricks, segments fill their
     // coarse cells whole — the original 120x280 renderer's chunky look.
     input  logic        chunky,
+
+    // Well-frame outer rect (360x840 raster coords). x0==x1 disables it.
+    // Driven by HT943.sv's cfg_frame_* registers (fallback array indexed
+    // by profile_sel, or the pak config section once loaded).
+    input  logic [8:0]  frame_x0,
+    input  logic [9:0]  frame_y0,
+    input  logic [8:0]  frame_x1,
+    input  logic [9:0]  frame_y1,
+
+    // Table write ports, driven by rtl/ht943_pak_loader.sv while a .pak
+    // downloads. One write port per table, full-word writes only.
+    input  logic        pixmap_wr,
+    input  logic [15:0] pixmap_waddr,
+    input  logic [9:0]  pixmap_wdata,
+
+    input  logic        segtab_wr,
+    input  logic [8:0]  segtab_waddr,
+    input  logic [9:0]  segtab_wdata,
+
+    input  logic        geotab_wr,
+    input  logic [8:0]  geotab_waddr,
+    input  logic [31:0] geotab_wdata_lo,
+    input  logic [21:0] geotab_wdata_hi,
 
     // CPU RAM read port. The rasterizer re-reads RAM every pixel.
     output logic [7:0]  ram_addr,
@@ -58,10 +105,6 @@ module ht943_lcd #(
     output logic        VBlank,
     output logic        ce_pix
 );
-
-    // Per-profile well-frame rects (PROFILE_FRAME_*) live in the shared
-    // profiles header; the rest of its localparams are unused here.
-    `include "rtl/ht943_profiles.svh"
 
     // 360x840 visible @ ~59.5Hz. 480*875*59.52 = 25 MHz = clk_sys/2
     // exactly (the previous 120x280 raster used the same trick with /18).
@@ -138,35 +181,50 @@ module ht943_lcd #(
     wire hsync_raw  = (h_count >= HSYNC_START) && (h_count < HSYNC_END);
     wire vsync_raw  = (v_count >= VSYNC_START) && (v_count < VSYNC_END);
 
-    // ---- coarse ownership maps: one 33600-word ROM per profile ----
+    // ---- coarse ownership map: one 33600-word RAM ----
     localparam int PIX_WORDS = CW * CH;
-    logic [9:0] pixmap0 [0:PIX_WORDS-1];
-    logic [9:0] pixmap1 [0:PIX_WORDS-1];
-    logic [9:0] pixmap2 [0:PIX_WORDS-1];
-    logic [9:0] pixmap3 [0:PIX_WORDS-1];
+    logic [9:0] pixmap [0:PIX_WORDS-1];
     // ---- segment index -> RAM {byte,bit} ----
-    logic [9:0] segtab0 [0:511];
-    logic [9:0] segtab1 [0:511];
-    logic [9:0] segtab2 [0:511];
-    logic [9:0] segtab3 [0:511];
-    // ---- segment index -> {brick, bbox, frame/gap metrics} ----
-    logic [53:0] geotab0 [0:511];
-    logic [53:0] geotab1 [0:511];
-    logic [53:0] geotab2 [0:511];
-    logic [53:0] geotab3 [0:511];
+    logic [9:0] segtab [0:511];
+    // ---- segment index -> {brick, bbox, frame/gap metrics}, split into
+    // two separately-named arrays (32b + 22b) so Quartus doesn't have to
+    // infer a single >32-bit-wide RAM — see the module header comment.
+    logic [31:0] geotab_lo [0:511];
+    logic [21:0] geotab_hi [0:511];
+
     initial begin
-        $readmemh("rtl/assets/E88_8in1_pix.hex", pixmap0);
-        $readmemh("rtl/assets/KeychainPinBall_pix.hex", pixmap1);
-        $readmemh("rtl/assets/Keychain55in1_pix.hex", pixmap2);
-        $readmemh("rtl/assets/SpaceIntruderTK150I_pix.hex", pixmap3);
-        $readmemh("rtl/assets/E88_8in1_seg.hex", segtab0);
-        $readmemh("rtl/assets/KeychainPinBall_seg.hex", segtab1);
-        $readmemh("rtl/assets/Keychain55in1_seg.hex", segtab2);
-        $readmemh("rtl/assets/SpaceIntruderTK150I_seg.hex", segtab3);
-        $readmemh("rtl/assets/E88_8in1_geo.hex", geotab0);
-        $readmemh("rtl/assets/KeychainPinBall_geo.hex", geotab1);
-        $readmemh("rtl/assets/Keychain55in1_geo.hex", geotab2);
-        $readmemh("rtl/assets/SpaceIntruderTK150I_geo.hex", geotab3);
+        $readmemh("rtl/assets/E88_8in1_pix.hex", pixmap);
+        $readmemh("rtl/assets/E88_8in1_seg.hex", segtab);
+    end
+
+    // geo.hex packs the full 54-bit word per line; split it into the two
+    // RAM-initialization arrays at elaboration time. This loop only
+    // determines initial contents (mirrors what two separate $readmemh
+    // hex files would do) — it does not add a read/write port to either
+    // array.
+    logic [53:0] geotab_init [0:511];
+    integer gi;
+    initial begin
+        $readmemh("rtl/assets/E88_8in1_geo.hex", geotab_init);
+        for (gi = 0; gi < 512; gi = gi + 1) begin
+            geotab_lo[gi] = geotab_init[gi][31:0];
+            geotab_hi[gi] = geotab_init[gi][53:32];
+        end
+    end
+
+    // ---- single write port per table (Quartus-safe: one address, one
+    // full-word write per cycle, no other driver of these arrays) ----
+    always @(posedge clk) begin
+        if (pixmap_wr) pixmap[pixmap_waddr] <= pixmap_wdata;
+    end
+    always @(posedge clk) begin
+        if (segtab_wr) segtab[segtab_waddr] <= segtab_wdata;
+    end
+    always @(posedge clk) begin
+        if (geotab_wr) geotab_lo[geotab_waddr] <= geotab_wdata_lo;
+    end
+    always @(posedge clk) begin
+        if (geotab_wr) geotab_hi[geotab_waddr] <= geotab_wdata_hi;
     end
 
     // ---- S0: coarse map address ----
@@ -174,39 +232,24 @@ module ht943_lcd #(
     // Clamped to 0 outside the visible area (never displayed anyway).
     wire [15:0] pix_idx = active_raw ? (16'(cy) * CW + 16'(cx)) : 16'd0;
 
-    // ---- S1: ownership word (registered BRAM read) ----
-    logic [9:0] pw0, pw1, pw2, pw3;
-    always @(posedge clk) begin
-        pw0 <= pixmap0[pix_idx];
-        pw1 <= pixmap1[pix_idx];
-        pw2 <= pixmap2[pix_idx];
-        pw3 <= pixmap3[pix_idx];
-    end
-    wire [9:0] pix_word = (profile == 2'd0) ? pw0 :
-                          (profile == 2'd1) ? pw1 :
-                          (profile == 2'd2) ? pw2 : pw3;
+    // ---- S1: ownership word (registered BRAM read, its own dedicated
+    // block per the Quartus-inference discipline above) ----
+    logic [9:0] pix_word;
+    always @(posedge clk) pix_word <= pixmap[pix_idx];
+
     wire       s1_bg  = pix_word[9];
     wire [8:0] s1_idx = pix_word[8:0];
 
-    // ---- S2: segment tables (registered BRAM reads) ----
-    logic [9:0]  sw0, sw1, sw2, sw3;
-    logic [53:0] gw0, gw1, gw2, gw3;
-    always @(posedge clk) begin
-        sw0 <= segtab0[s1_idx];
-        sw1 <= segtab1[s1_idx];
-        sw2 <= segtab2[s1_idx];
-        sw3 <= segtab3[s1_idx];
-        gw0 <= geotab0[s1_idx];
-        gw1 <= geotab1[s1_idx];
-        gw2 <= geotab2[s1_idx];
-        gw3 <= geotab3[s1_idx];
-    end
-    wire [9:0]  seg_word = (profile == 2'd0) ? sw0 :
-                           (profile == 2'd1) ? sw1 :
-                           (profile == 2'd2) ? sw2 : sw3;
-    wire [53:0] geo_word = (profile == 2'd0) ? gw0 :
-                           (profile == 2'd1) ? gw1 :
-                           (profile == 2'd2) ? gw2 : gw3;
+    // ---- S2: segment tables (registered BRAM reads, one dedicated
+    // block each) ----
+    logic [9:0]  seg_word;
+    logic [31:0] geo_lo;
+    logic [21:0] geo_hi;
+    always @(posedge clk) seg_word <= segtab[s1_idx];
+    always @(posedge clk) geo_lo   <= geotab_lo[s1_idx];
+    always @(posedge clk) geo_hi   <= geotab_hi[s1_idx];
+
+    wire [53:0] geo_word = {geo_hi, geo_lo};
 
     wire        geo_brick = geo_word[53];
     wire [8:0]  geo_x     = geo_word[52:44];
@@ -260,21 +303,17 @@ module ht943_lcd #(
 
     // Well frame: the printed line a real faceplate draws between the
     // playfield and the score/NEXT panel. Not an LCD segment — always
-    // dark, independent of RAM state. Rect comes from the generator
-    // (outer edge; the line is FT thick, i.e. outer minus inner).
-    // X0==X1 disables it (faces without a brick well).
+    // dark, independent of RAM state. Rect comes from HT943.sv's cfg_
+    // frame_* registers (outer edge; the line is FT thick, i.e. outer
+    // minus inner). X0==X1 disables it (faces without a brick well).
     localparam int FT = 3;
-    wire [8:0] fr_x0 = PROFILE_FRAME_X0[profile];
-    wire [9:0] fr_y0 = PROFILE_FRAME_Y0[profile];
-    wire [8:0] fr_x1 = PROFILE_FRAME_X1[profile];
-    wire [9:0] fr_y1 = PROFILE_FRAME_Y1[profile];
-    wire fr_outer = (hx2 >= fr_x0) && (hx2 < fr_x1) &&
-                    (hy2 >= fr_y0) && (hy2 < fr_y1);
-    wire fr_inner = ({1'b0, hx2} >= {1'b0, fr_x0} + FT) &&
-                    ({1'b0, hx2} <  {1'b0, fr_x1} - FT) &&
-                    ({1'b0, hy2} >= {1'b0, fr_y0} + FT) &&
-                    ({1'b0, hy2} <  {1'b0, fr_y1} - FT);
-    wire frame_hit = (fr_x0 != fr_x1) && fr_outer && !fr_inner;
+    wire fr_outer = (hx2 >= frame_x0) && (hx2 < frame_x1) &&
+                    (hy2 >= frame_y0) && (hy2 < frame_y1);
+    wire fr_inner = ({1'b0, hx2} >= {1'b0, frame_x0} + FT) &&
+                    ({1'b0, hx2} <  {1'b0, frame_x1} - FT) &&
+                    ({1'b0, hy2} >= {1'b0, frame_y0} + FT) &&
+                    ({1'b0, hy2} <  {1'b0, frame_y1} - FT);
+    wire frame_hit = (frame_x0 != frame_x1) && fr_outer && !fr_inner;
 
     // Registered: the S2 outputs (and the combinational RAM read + bbox
     // math on them) are valid 2 cycles after S0; registering here makes

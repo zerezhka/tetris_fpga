@@ -55,6 +55,11 @@ localparam CONF_STR = {
 	// so sound ROMs on the SD card are named .sro.
 	"F1,BIN,Load ROM;",
 	"F2,SRO,Load Sound ROM;",
+	// Device pack (plan-device-packs.md): face + profile in one file,
+	// streamed in and unpacked by ht943_pak_loader below (ioctl_index
+	// 3). Overrides the CRC-autodetect fallback profile once loaded —
+	// see PROFILE AUTODETECT / CONFIGURATION and pak_loaded below.
+	"F3,PAK,Load Device;",
 	"-;",
 	// O68 = status bits [8:6]. NOT O01: bit 0 is the T0/R0 Reset button —
 	// with the profile on bits [1:0], selecting profile 1 or 3 held the
@@ -262,6 +267,25 @@ always @(posedge clk_sys) begin
 	end
 end
 
+///////////////////////   PAK DOWNLOAD   //////////////////////////
+
+// .pak device pack (F3): face + profile, unpacked by ht943_pak_loader
+// below. download_reset already fires on ANY ioctl_download regardless
+// of index (see RESET above), so the core is held in reset for the
+// whole pak stream exactly like a .bin/.sro load.
+reg        pak_wr;
+reg [16:0] pak_addr;
+reg [7:0]  pak_data;
+
+always @(posedge clk_sys) begin
+	pak_wr <= 0;
+	if (ioctl_download & ioctl_wr & (ioctl_index[5:0] == 6'd3)) begin
+		pak_wr   <= 1;
+		pak_addr <= ioctl_addr[16:0];
+		pak_data <= ioctl_dout;
+	end
+end
+
 ///////////////////////   PROFILE AUTODETECT   ///////////////////
 
 // CRC32 the .bin as it streams in over ioctl (zlib/IEEE: init 0xFFFFFFFF,
@@ -330,6 +354,13 @@ reg  [3:0] cfg_pp_wakeup, cfg_pm_wakeup, cfg_ps_wakeup;
 reg [15:0] cfg_sound_freq_div;
 reg  [1:0] cfg_profile;
 
+// Well-frame rect fed to ht943_lcd (that module no longer carries its own
+// per-profile PROFILE_FRAME_* mux — see its header comment). Step 3 layers
+// a pak-config override on top of this fallback latch, same as the other
+// cfg_* registers above.
+reg  [8:0] cfg_frame_x0, cfg_frame_x1;
+reg  [9:0] cfg_frame_y0, cfg_frame_y1;
+
 localparam CFG_WORDS = 39; // 7 config + 16 speed + 16 effect
 
 always @(posedge clk_sys) begin
@@ -343,6 +374,11 @@ always @(posedge clk_sys) begin
 		cfg_pm_wakeup      <= PROFILE_PM_WAKEUP[profile_sel];
 		cfg_ps_wakeup      <= PROFILE_PS_WAKEUP[profile_sel];
 		cfg_sound_freq_div <= PROFILE_SOUND_FREQ_DIV[profile_sel];
+
+		cfg_frame_x0 <= PROFILE_FRAME_X0[profile_sel];
+		cfg_frame_y0 <= PROFILE_FRAME_Y0[profile_sel];
+		cfg_frame_x1 <= PROFILE_FRAME_X1[profile_sel];
+		cfg_frame_y1 <= PROFILE_FRAME_Y1[profile_sel];
 	end else if (cfg_active) begin
 		if (cfg_idx == CFG_WORDS - 1)
 			cfg_active <= 0;
@@ -408,6 +444,67 @@ wire [3:0] ps_in = ~{|(PROFILE_PS_JMAP[cfg_profile][3] & joy),
 // reset instead of a PP/PM/PS bit.
 wire btn_reset = |(PROFILE_RESET_JMAP[cfg_profile] & joy);
 
+///////////////////////   PAK LOADER   /////////////////////////////
+
+// Unpacks a streamed .pak (see PAK DOWNLOAD above / rtl/gen_device_pack.py)
+// into ht943_lcd's table write ports and a set of config outputs. Step 3
+// latches pak_cfg_* into the cfg_* registers above (with pak_loaded
+// override-ordering); for now only the LCD table writes are live — the
+// config side of the interface exists but isn't consumed yet.
+wire        pak_pixmap_wr;
+wire [15:0] pak_pixmap_waddr;
+wire [9:0]  pak_pixmap_wdata;
+wire        pak_segtab_wr;
+wire [8:0]  pak_segtab_waddr;
+wire [9:0]  pak_segtab_wdata;
+wire        pak_geotab_wr;
+wire [8:0]  pak_geotab_waddr;
+wire [31:0] pak_geotab_wdata_lo;
+wire [21:0] pak_geotab_wdata_hi;
+
+wire [15:0] pak_cfg_clk_div;
+wire [15:0] pak_cfg_timer_div;
+wire [3:0]  pak_cfg_pp_wakeup, pak_cfg_pm_wakeup, pak_cfg_ps_wakeup;
+wire [15:0] pak_cfg_sound_freq_div;
+wire [11:0] pak_cfg_reset_jmap;
+wire [11:0] pak_cfg_pp_jmap0, pak_cfg_pp_jmap1, pak_cfg_pp_jmap2, pak_cfg_pp_jmap3;
+wire [11:0] pak_cfg_pm_jmap0, pak_cfg_pm_jmap1, pak_cfg_pm_jmap2, pak_cfg_pm_jmap3;
+wire [11:0] pak_cfg_ps_jmap0, pak_cfg_ps_jmap1, pak_cfg_ps_jmap2, pak_cfg_ps_jmap3;
+wire [7:0]  pak_cfg_spd [0:15];
+wire [7:0]  pak_cfg_fx  [0:15];
+wire [8:0]  pak_cfg_frame_x0, pak_cfg_frame_x1;
+wire [9:0]  pak_cfg_frame_y0, pak_cfg_frame_y1;
+wire        pak_done;
+
+ht943_pak_loader pak_loader
+(
+	.clk(clk_sys),
+	.rst(reset),
+
+	.wr  (pak_wr),
+	.addr(pak_addr),
+	.data(pak_data),
+
+	.pixmap_wr(pak_pixmap_wr), .pixmap_waddr(pak_pixmap_waddr), .pixmap_wdata(pak_pixmap_wdata),
+	.segtab_wr(pak_segtab_wr), .segtab_waddr(pak_segtab_waddr), .segtab_wdata(pak_segtab_wdata),
+	.geotab_wr(pak_geotab_wr), .geotab_waddr(pak_geotab_waddr),
+	.geotab_wdata_lo(pak_geotab_wdata_lo), .geotab_wdata_hi(pak_geotab_wdata_hi),
+
+	.cfg_clk_div(pak_cfg_clk_div),
+	.cfg_timer_div(pak_cfg_timer_div),
+	.cfg_pp_wakeup(pak_cfg_pp_wakeup), .cfg_pm_wakeup(pak_cfg_pm_wakeup), .cfg_ps_wakeup(pak_cfg_ps_wakeup),
+	.cfg_sound_freq_div(pak_cfg_sound_freq_div),
+	.cfg_reset_jmap(pak_cfg_reset_jmap),
+	.cfg_pp_jmap0(pak_cfg_pp_jmap0), .cfg_pp_jmap1(pak_cfg_pp_jmap1), .cfg_pp_jmap2(pak_cfg_pp_jmap2), .cfg_pp_jmap3(pak_cfg_pp_jmap3),
+	.cfg_pm_jmap0(pak_cfg_pm_jmap0), .cfg_pm_jmap1(pak_cfg_pm_jmap1), .cfg_pm_jmap2(pak_cfg_pm_jmap2), .cfg_pm_jmap3(pak_cfg_pm_jmap3),
+	.cfg_ps_jmap0(pak_cfg_ps_jmap0), .cfg_ps_jmap1(pak_cfg_ps_jmap1), .cfg_ps_jmap2(pak_cfg_ps_jmap2), .cfg_ps_jmap3(pak_cfg_ps_jmap3),
+	.cfg_spd(pak_cfg_spd), .cfg_fx(pak_cfg_fx),
+	.cfg_frame_x0(pak_cfg_frame_x0), .cfg_frame_y0(pak_cfg_frame_y0),
+	.cfg_frame_x1(pak_cfg_frame_x1), .cfg_frame_y1(pak_cfg_frame_y1),
+
+	.done(pak_done)
+);
+
 ///////////////////////   LCD VIDEO   ////////////////////////////
 
 wire [7:0] lcd_R, lcd_G, lcd_B;
@@ -419,8 +516,16 @@ ht943_lcd lcd
 (
 	.clk(clk_sys),
 	.rst(reset),
-	.profile(cfg_profile),
 	.chunky(status[11]),
+
+	.frame_x0(cfg_frame_x0), .frame_y0(cfg_frame_y0),
+	.frame_x1(cfg_frame_x1), .frame_y1(cfg_frame_y1),
+
+	.pixmap_wr(pak_pixmap_wr), .pixmap_waddr(pak_pixmap_waddr), .pixmap_wdata(pak_pixmap_wdata),
+	.segtab_wr(pak_segtab_wr), .segtab_waddr(pak_segtab_waddr), .segtab_wdata(pak_segtab_wdata),
+	.geotab_wr(pak_geotab_wr), .geotab_waddr(pak_geotab_waddr),
+	.geotab_wdata_lo(pak_geotab_wdata_lo), .geotab_wdata_hi(pak_geotab_wdata_hi),
+
 	.ram_addr(lcd_ram_addr),
 	.ram_data(lcd_ram_data),
 	.R(lcd_R),
