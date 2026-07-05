@@ -40,6 +40,9 @@ module ht943_lcd #(
     input  logic        rst,
 
     input  logic [1:0]  profile,
+    // 1 = "Compressed": disable procedural bricks, segments fill their
+    // coarse cells whole — the original 120x280 renderer's chunky look.
+    input  logic        chunky,
 
     // CPU RAM read port. The rasterizer re-reads RAM every pixel.
     output logic [7:0]  ram_addr,
@@ -278,7 +281,8 @@ module ht943_lcd #(
     // the data path a uniform 3 cycles, matching the d_*[2] geometry taps.
     reg dark;
     always @(posedge clk)
-        dark <= frame_hit || (lit_state && (geo_brick ? brick_dark : 1'b1));
+        dark <= frame_hit ||
+                (lit_state && ((geo_brick && !chunky) ? brick_dark : 1'b1));
 
     // ---- output stage: geometry delayed 3 cycles to match the data ----
     reg [2:0] d_hsync, d_vsync, d_hblank, d_vblank, d_active, d_ce;

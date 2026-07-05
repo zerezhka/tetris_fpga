@@ -66,9 +66,16 @@ localparam CONF_STR = {
 	// Value 0 = Auto: the profile is detected from the loaded ROM's CRC32
 	// (see PROFILE AUTODETECT below); 1..4 force a specific profile.
 	"O68,ROM profile,Auto,E88 1MHz,KeychainPinBall 256kHz,Keychain55in1 512kHz,SpaceIntruder 950kHz;",
-	// Integer scaling via sys/video_freak (SCALE input 0..3): V-Integer
-	// snaps height to a multiple of 840, the HV variants also snap width.
-	"O9A,Scale,Normal,V-Integer,HV-Integer(-),HV-Integer(+);",
+	// Integer scaling via sys/video_freak: V-Integer (default, hence
+	// FIRST value — Main has no default field, index 0 is it) snaps
+	// height to a multiple of 840, the HV variants also snap width,
+	// Normal is plain ascal stretch. Remapped to video_freak's SCALE
+	// encoding at the instantiation.
+	"O9A,Scale,V-Integer,Normal,HV-Integer(-),HV-Integer(+);",
+	// Compressed = the pre-3x chunky look: procedural bricks off,
+	// segments fill their coarse 120x280 cells — every brick quantized
+	// differently. Kept on purpose, it has charm.
+	"OB,LCD Style,SVG,Compressed;",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
@@ -76,7 +83,10 @@ localparam CONF_STR = {
 	"-;",
 	"T0,Reset;",
 	"R0,Reset and close OSD;",
-	"v,0;",
+	// v1: Scale option added with V-Integer as value 0 — bump discards
+	// configs saved against the old bit layout (day-one release, no
+	// installed base to protect).
+	"v,1;",
 	"V,v",`BUILD_DATE
 };
 
@@ -410,6 +420,7 @@ ht943_lcd lcd
 	.clk(clk_sys),
 	.rst(reset),
 	.profile(cfg_profile),
+	.chunky(status[11]),
 	.ram_addr(lcd_ram_addr),
 	.ram_data(lcd_ram_data),
 	.R(lcd_R),
@@ -472,7 +483,10 @@ video_freak video_freak
 	.ARY(12'd7),
 	.CROP_SIZE(12'd0),
 	.CROP_OFF(5'd0),
-	.SCALE({1'b0, status[10:9]})
+	// OSD value order is V-Integer,Normal,HV-,HV+ (default-first);
+	// video_freak encodes 0=normal 1=V-int 2=HV- 3=HV+, so swap 0<->1.
+	.SCALE((status[10:9] == 2'd0) ? 3'd1 :
+	       (status[10:9] == 2'd1) ? 3'd0 : {1'b0, status[10:9]})
 );
 
 ///////////////////////   AUDIO   ////////////////////////////////
