@@ -46,20 +46,22 @@ assign BUTTONS = 0;
 localparam CONF_STR = {
 	"HT943;;",
 	"-;",
-	// Explicit F-indices: without a digit, Main_MiSTer sends menusub+1 as
-	// ioctl_index (menu.cpp MENU_GENERIC_MAIN), i.e. whatever row the entry
-	// happens to sit on — pin them so the download decoder below can rely
-	// on 1=.bin / 2=.sro regardless of menu layout. Extension fields are
-	// split into 3-char chunks by Main — "SROM" would parse as two
-	// extensions "SRO"+"M" and .srom files never matched the file browser,
-	// so sound ROMs on the SD card are named .sro.
+	// A device is a coherent bundle — program ROM (.bin), sound ROM (.sro)
+	// and device pack (.pak: face + profile) — and is launched as a unit by
+	// its .mgl in _Console (one click streams all three via ioctl indices
+	// 1/2/3, decoded below). We deliberately expose NO OSD loaders for the
+	// sound or pak: hand-picking a .sro/.pak for a different device only
+	// mismatches sound/face against the running ROM — pointless and
+	// confusing. mgl loads by index directly (like an arcade .mra), so it
+	// does not need CONF_STR F-entries; the download decoder keys purely on
+	// ioctl_index[5:0].
+	//
+	// F1 stays as the one manual loader: a bare program ROM (e.g. homebrew,
+	// or any dump without a pak) is a legitimate thing to open, and it
+	// falls back to CRC-autodetected profile + the $readmemh E88 face.
+	// Explicit index: without a digit Main_MiSTer sends menusub+1 as
+	// ioctl_index, so pin it to 1=.bin regardless of menu layout.
 	"F1,BIN,Load ROM;",
-	"F2,SRO,Load Sound ROM;",
-	// Device pack (plan-device-packs.md): face + profile in one file,
-	// streamed in and unpacked by ht943_pak_loader below (ioctl_index
-	// 3). Overrides the CRC-autodetect fallback profile once loaded —
-	// see PROFILE AUTODETECT / CONFIGURATION and pak_loaded below.
-	"F3,PAK,Load Device;",
 	"-;",
 	// O68 = status bits [8:6]. NOT O01: bit 0 is the T0/R0 Reset button —
 	// with the profile on bits [1:0], selecting profile 1 or 3 held the
