@@ -22,3 +22,4 @@ sim/rom_*.hex
 sim/sound_*.hex
 sim/speed_*.hex
 sim/effect_*.hex
+sim/obj_dir_pak_loader/
