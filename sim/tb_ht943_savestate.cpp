@@ -66,6 +66,14 @@ int main(int argc, char** argv) {
         snap[k] = top->ss_rdata & 0xFF;
     }
 
+    // Optional: dump the raw SS_BYTES snapshot as a .sav file (a real,
+    // valid savestate for this ROM) so it can be loaded on hardware.
+    if (argc > 3) {
+        FILE* sf = fopen(argv[3], "wb");
+        if (sf) { fwrite(snap.data(), 1, SS_BYTES, sf); fclose(sf);
+                  std::fprintf(stderr, "wrote %s (%d bytes)\n", argv[3], SS_BYTES); }
+    }
+
     std::vector<Rec> traceA;
     run_record(M, &traceA);
 
