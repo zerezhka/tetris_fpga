@@ -106,12 +106,20 @@ def check_face(name):
                           f'{HW}x{HH} raster')
         if brick:
             nbricks += 1
-            if min(tx, ty, gx, gy) < 1:
-                errors.append(f'brick segment {i}: zero frame/gap metric '
-                              f'({tx},{ty},{gx},{gy})')
-            if 2 * (tx + gx) >= w or 2 * (ty + gy) >= h:
-                errors.append(f'brick segment {i}: metrics ({tx},{ty},'
-                              f'{gx},{gy}) leave no fill in {w}x{h}')
+            # A SOLID brick is one whose frame spans the whole bbox on
+            # either axis (2*t >= size): the RTL's in_frame OR then covers
+            # every pixel, so it draws a solid filled rect (thin projectile
+            # / dot segments use this — see extract_segments_mask.py's
+            # thin-solid pass). gx/gy are unused and the hollow-brick
+            # frame+gap+fill checks below do not apply.
+            solid = (2 * tx >= w) or (2 * ty >= h)
+            if not solid:
+                if min(tx, ty, gx, gy) < 1:
+                    errors.append(f'brick segment {i}: zero frame/gap metric '
+                                  f'({tx},{ty},{gx},{gy})')
+                if 2 * (tx + gx) >= w or 2 * (ty + gy) >= h:
+                    errors.append(f'brick segment {i}: metrics ({tx},{ty},'
+                                  f'{gx},{gy}) leave no fill in {w}x{h}')
     meta_path = os.path.join(ROOT, 'rtl', 'assets', f'{name}_meta.json')
     with open(meta_path) as f:
         frame = json.load(f).get('frame')

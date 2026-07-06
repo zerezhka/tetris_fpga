@@ -352,6 +352,56 @@ def extract(svg_path, outprefix, cw=120, ch=280, scale=3):
             bboxes[i] = (nx, ny, uw, uh)
             brick_metrics[i] = ut
 
+    # Thin solid "dot/bar" segments (SpaceIntruder's 2px-wide bullet trail
+    # is the motivating case): rendered by coarse-cell fill, a 2px feature
+    # lands in 1 or 2 coarse cells depending on its sub-cell phase, so the
+    # projectile visibly changes size as it travels its column. Draw them
+    # procedurally as SOLID rects at a uniform per-cluster size instead,
+    # reusing the brick path — a "brick" whose frame thickness reaches half
+    # the bbox fills solid (in_frame covers every pixel, no gap/inner).
+    # Deliberately NOT added to `clusters`, so they never seed a well frame
+    # (well_candidates = the largest real-brick cluster). Only clusters of
+    # >= 3 similar thin-solid segments qualify, so a lone thin element is
+    # left as plain coarse rendering (this pass changes nothing on faces
+    # without a repeated thin-bar element, e.g. the tetris playfields).
+    def _ink_cov(i):
+        x, y, w, h = bboxes[i]
+        own = make_own(i)
+        ink = sum(1 for py in range(y, y + h) for px in range(x, x + w)
+                  if 0 <= px < hw and 0 <= py < hh and own(px, py))
+        return ink / max(1, w * h)
+
+    thin = [i for i in range(len(segs))
+            if not brick_flags[i]
+            and min(bboxes[i][2], bboxes[i][3]) <= 2
+            and max(bboxes[i][2], bboxes[i][3]) <= 24
+            and _ink_cov(i) >= 0.9]
+    thin_clusters = []  # [(w, h), [indices]]
+    for i in thin:
+        _, _, w, h = bboxes[i]
+        for c in thin_clusters:
+            if abs(c[0][0] - w) <= 2 and abs(c[0][1] - h) <= 2:
+                c[1].append(i)
+                break
+        else:
+            thin_clusters.append([(w, h), [i]])
+    for (cw_, ch_), members in thin_clusters:
+        if len(members) < 3:
+            continue
+        med = lambda vals: sorted(vals)[len(vals) // 2]
+        uw = med([bboxes[i][2] for i in members])
+        uh = med([bboxes[i][3] for i in members])
+        # frame thickness >= half the bbox in each axis => solid fill.
+        ut = ((uw + 1) // 2, (uh + 1) // 2, 0, 0)
+        for i in members:
+            x, y, w, h = bboxes[i]
+            nx = max(0, min(hw - uw, x + (w - uw) // 2))
+            ny = max(0, min(hh - uh, y + (h - uh) // 2))
+            bboxes[i] = (nx, ny, uw, uh)
+            brick_metrics[i] = ut
+            brick_flags[i] = True
+    n_brick = sum(brick_flags)
+
     # Coarse ownership render: SS x SS oversample of the COARSE grid with
     # antialiasing off, majority-of-block ownership at >= 1/4 coverage
     # (center-ish sampling made ~1px features flicker per sub-pixel
