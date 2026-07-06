@@ -471,11 +471,13 @@ module ht943_lcd #(
     localparam [7:0] FG_R = 8'h18, FG_G = 8'h20, FG_B = 8'h18; // level 4 (full ink)
     // Intermediate colors are elaboration-time constants (plain
     // constant-folded division, no per-pixel multiplier/divider). Ghost
-    // (level 1) = paper blended ~10% toward ink -- just enough to see the
-    // dormant segment; MID1 (level 2) = 1/3, MID2 (level 3) = 2/3.
-    localparam [7:0] GH_R   = BG_R - (BG_R - FG_R) / 10;
-    localparam [7:0] GH_G   = BG_G - (BG_G - FG_G) / 10;
-    localparam [7:0] GH_B   = BG_B - (BG_B - FG_B) / 10;
+    // (level 1) = paper blended ~5% toward ink -- barely-there, matching a
+    // real reflective LCD whose dormant segments have almost no "density"
+    // head-on and only ghost faintly at a viewing angle (see plan-device-
+    // packs.md, LCD-realism notes); MID1 (level 2) = 1/3, MID2 (3) = 2/3.
+    localparam [7:0] GH_R   = BG_R - (BG_R - FG_R) / 20;
+    localparam [7:0] GH_G   = BG_G - (BG_G - FG_G) / 20;
+    localparam [7:0] GH_B   = BG_B - (BG_B - FG_B) / 20;
     localparam [7:0] MID1_R = BG_R - (BG_R - FG_R) / 3;
     localparam [7:0] MID1_G = BG_G - (BG_G - FG_G) / 3;
     localparam [7:0] MID1_B = BG_B - (BG_B - FG_B) / 3;
