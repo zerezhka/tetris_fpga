@@ -53,13 +53,17 @@ localparam CONF_STR = {
 	// split into 3-char chunks by Main — "SROM" would parse as two
 	// extensions "SRO"+"M" and .srom files never matched the file browser,
 	// so sound ROMs on the SD card are named .sro.
-	"F1,BIN,Load ROM;",
-	"F2,SRO,Load Sound ROM;",
+	// FC = "remember last loaded" (Main_MiSTer auto-reloads the file for this
+	// index on core start) — so the user doesn't re-pick BIN/SRO/PAK every
+	// launch. The index digit stays right after FC ("FC1"), which .mgl still
+	// validates load indices against; 3-char extension fields are unchanged.
+	"FC1,BIN,Load ROM;",
+	"FC2,SRO,Load Sound ROM;",
 	// Device pack (plan-device-packs.md): face + profile in one file,
 	// streamed in and unpacked by ht943_pak_loader below (ioctl_index
 	// 3). Overrides the CRC-autodetect fallback profile once loaded —
 	// see PROFILE AUTODETECT / CONFIGURATION and pak_loaded below.
-	"F3,PAK,Load Device;",
+	"FC3,PAK,Load Device;",
 	"-;",
 	// O68 = status bits [8:6]. NOT O01: bit 0 is the T0/R0 Reset button —
 	// with the profile on bits [1:0], selecting profile 1 or 3 held the
