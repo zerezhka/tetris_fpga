@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(ROOT, 'tools'))
 from gen_mister_profiles import build_profile, gen_segment_maps  # noqa: E402
 
 MAGIC = b'HTPK'
-VERSION = 1
+VERSION = 2  # v2: appended the fine ink-mask section (see below)
 
 HEADER_SIZE = 32
 CONFIG_SIZE = 256
@@ -58,9 +58,17 @@ GEOTAB_SIZE = NUM_SEGS * 8
 PIX_CW, PIX_CH = 120, 280
 PIXMAP_WORDS = PIX_CW * PIX_CH
 PIXMAP_SIZE = PIXMAP_WORDS * 2
+# Fine ink mask: full-res 360x840 1bpp shape raster of non-brick segments
+# (plan-fine-mask-renderer.md). Appended AFTER pixmap at a hardcoded
+# offset — the 32-byte header keeps its 5 section offsets, and both this
+# generator and ht943_pak_loader.sv hardcode the section layout, so no
+# header field is needed. 16 px/word, row-major, LSB = leftmost pixel.
+INK_HW, INK_HH = 360, 840
+INKMASK_WORDS = (INK_HW * INK_HH + 15) // 16
+INKMASK_SIZE = INKMASK_WORDS * 2
 
 PACK_SIZE = HEADER_SIZE + CONFIG_SIZE + FRAME_SIZE + SEGTAB_SIZE + \
-    GEOTAB_SIZE + PIXMAP_SIZE
+    GEOTAB_SIZE + PIXMAP_SIZE + INKMASK_SIZE
 
 
 def read_hex_words(path):
@@ -113,6 +121,13 @@ def build_pixmap_bytes(pix_words):
     return struct.pack(f'<{PIXMAP_WORDS}H', *pix_words)
 
 
+def build_inkmask_bytes(ink_words):
+    if len(ink_words) != INKMASK_WORDS:
+        raise ValueError(
+            f'ink mask has {len(ink_words)} words, expected {INKMASK_WORDS}')
+    return struct.pack(f'<{INKMASK_WORDS}H', *ink_words)
+
+
 def build_pack(name, regen_assets=False):
     """Build a complete .pak byte string for BrickEmuPy asset `name`."""
     profile = build_profile(name)
@@ -123,6 +138,7 @@ def build_pack(name, regen_assets=False):
     seg_words = read_hex_words(f'{prefix}_seg.hex')
     geo_words = read_hex_words(f'{prefix}_geo.hex')
     pix_words = read_hex_words(f'{prefix}_pix.hex')
+    ink_words = read_hex_words(f'{prefix}_ink.hex')
     with open(f'{prefix}_meta.json') as f:
         frame = json.load(f).get('frame')
 
@@ -131,12 +147,15 @@ def build_pack(name, regen_assets=False):
     segtab_bytes = build_segtab_bytes(seg_words)
     geotab_bytes = build_geotab_bytes(geo_words)
     pixmap_bytes = build_pixmap_bytes(pix_words)
+    inkmask_bytes = build_inkmask_bytes(ink_words)
 
     config_off = HEADER_SIZE
     frame_off = config_off + CONFIG_SIZE
     segtab_off = frame_off + FRAME_SIZE
     geotab_off = segtab_off + SEGTAB_SIZE
     pixmap_off = geotab_off + GEOTAB_SIZE
+    # inkmask follows pixmap at a hardcoded offset (no header field) —
+    # pixmap_off + PIXMAP_SIZE; ht943_pak_loader.sv hardcodes the same.
 
     header = MAGIC + struct.pack('<7I', VERSION, profile['rom_crc'],
                                   config_off, frame_off, segtab_off,
@@ -144,7 +163,7 @@ def build_pack(name, regen_assets=False):
     assert len(header) == HEADER_SIZE
 
     pak = header + config_bytes + frame_bytes + segtab_bytes + \
-        geotab_bytes + pixmap_bytes
+        geotab_bytes + pixmap_bytes + inkmask_bytes
     assert len(pak) == PACK_SIZE, f'{len(pak)} != {PACK_SIZE}'
     return pak
 
@@ -175,6 +194,9 @@ def parse_pack(data):
                             data[geotab_off:geotab_off + GEOTAB_SIZE])
     pixmap = struct.unpack(f'<{PIXMAP_WORDS}H',
                             data[pixmap_off:pixmap_off + PIXMAP_SIZE])
+    inkmask_off = pixmap_off + PIXMAP_SIZE
+    inkmask = struct.unpack(f'<{INKMASK_WORDS}H',
+                            data[inkmask_off:inkmask_off + INKMASK_SIZE])
 
     return {
         'version': version,
@@ -191,6 +213,7 @@ def parse_pack(data):
         'segtab': list(segtab),
         'geotab': list(geotab),
         'pixmap': list(pixmap),
+        'inkmask': list(inkmask),
     }
 
 

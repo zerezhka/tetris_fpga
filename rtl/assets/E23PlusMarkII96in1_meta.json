@@ -2,6 +2,11 @@
  "n_segments": 291,
  "n_bricks": 212,
  "clusters": [],
- "frame": null,
+ "frame": [
+  0,
+  97,
+  231,
+  840
+ ],
  "scale": 3
 }

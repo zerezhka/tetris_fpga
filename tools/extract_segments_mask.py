@@ -425,9 +425,10 @@ def extract(svg_path, outprefix, cw=120, ch=280, scale=3):
             brick_metrics[i] = (tx, ty, 0, 0)
             brick_flags[i] = True
 
-    for _, members in _cluster(thin_cands) + _cluster(large_cands):
-        if len(members) >= 3:
-            _apply_solid(members)
+    large_clusters = [c for c in _cluster(large_cands) if len(c[1]) >= 3]
+    thin_clusters = [c for c in _cluster(thin_cands) if len(c[1]) >= 3]
+    for _, members in thin_clusters + large_clusters:
+        _apply_solid(members)
     n_brick = sum(brick_flags)
 
     # Coarse ownership render: SS x SS oversample of the COARSE grid with
@@ -582,9 +583,38 @@ def extract(svg_path, outprefix, cw=120, ch=280, scale=3):
             flo.write(f'{word & 0xFFFFFFFF:08X}\n')
             fhi.write(f'{word >> 32:06X}\n')
 
+    # Fine ink mask: full-res (hw x hh) 1bpp raster of every NON-brick
+    # segment's exact shape, straight off the same Qt render used for the
+    # bboxes above (bimg). This is the pre-rasterized "SVG-fidelity" layer
+    # (see plan-fine-mask-renderer.md): the RTL, in Fine mode, ANDs a lit
+    # non-brick segment with this mask instead of filling its whole coarse
+    # cell, so digits/icons/text render crisp. Brick segments are drawn
+    # procedurally and never read the mask, so their pixels are excluded
+    # (keeps the mask a clean non-brick layer). Packed 16 px/word, row-
+    # major, LSB = leftmost pixel of the group — matches the RTL's
+    # word[idx & 15] select and the pak's little-endian u16 section.
+    nonbrick_colors = {color_to_rgb(index_to_color(i)): i
+                       for i in range(len(segs)) if not brick_flags[i]}
+    INK_WORDS = (hw * hh + 15) // 16
+    ink = [0] * INK_WORDS
+    for y in range(hh):
+        base = y * hw
+        for x in range(hw):
+            if (bimg.pixel(x, y) & 0xFFFFFF) in nonbrick_colors:
+                idx = base + x
+                ink[idx >> 4] |= 1 << (idx & 15)
+    with open(f'{outprefix}_ink.hex', 'w') as f:
+        for w in ink:
+            f.write(f'{w:04X}\n')
+
     # Well candidates = the biggest size cluster (uniformized above, and
     # immune to stamping demotions: a demoted cell still sits in the well).
-    well_candidates = max((c[1] for c in clusters), key=len) if clusters else []
+    # Includes large solid-grid clusters (E23-style filled-square playfields
+    # have no hollow brick_signature at all, so `clusters` alone is empty
+    # for them) but never the thin/dot clusters, which would seed a
+    # spurious frame around a projectile's travel path.
+    well_source = [c[1] for c in clusters] + [c[1] for c in large_clusters]
+    well_candidates = max(well_source, key=len) if well_source else []
     frame = find_well_frame(bboxes, well_candidates, bboxes, hw, hh)
     if frame:
         print(f'well frame: {frame}', file=sys.stderr)

@@ -41,12 +41,12 @@ int main(int argc, char** argv) {
     Vht943_pak_loader* pl = use_pak ? new Vht943_pak_loader : nullptr;
 
     // Table write ports default idle; a pak stream drives them below.
-    lcd->pixmap_wr = 0; lcd->segtab_wr = 0; lcd->geotab_wr = 0;
+    lcd->pixmap_wr = 0; lcd->segtab_wr = 0; lcd->geotab_wr = 0; lcd->inkmask_wr = 0;
     // LCD look options: exercise the shipping default look — persistence
     // on (segments ramp/saturate; the DISCARD_FRAMES loop below waits them
     // out to full ink), ghost off (unlit cells stay paper, so a saturated
     // all-on face is byte-identical to the old crisp render).
-    lcd->persist_en = 1; lcd->ghost_en = 0;
+    lcd->persist_en = 1; lcd->ghost_lvl = 3; lcd->fine_en = 1;
 
     if (use_pak) {
         FILE* pf = fopen(pak_arg, "rb");
@@ -82,6 +82,9 @@ int main(int argc, char** argv) {
             lcd->geotab_waddr    = pl->geotab_waddr;
             lcd->geotab_wdata_lo = pl->geotab_wdata_lo;
             lcd->geotab_wdata_hi = pl->geotab_wdata_hi;
+            lcd->inkmask_wr    = pl->inkmask_wr;
+            lcd->inkmask_waddr = pl->inkmask_waddr;
+            lcd->inkmask_wdata = pl->inkmask_wdata;
             lcd->clk = clk_val;
             lcd->eval();
         };
@@ -103,7 +106,7 @@ int main(int argc, char** argv) {
         }
         pl->wr = 0; pl->rst = 0;
         for (int i = 0; i < 4; i++) { tick_both(0); tick_both(1); }
-        lcd->pixmap_wr = 0; lcd->segtab_wr = 0; lcd->geotab_wr = 0;
+        lcd->pixmap_wr = 0; lcd->segtab_wr = 0; lcd->geotab_wr = 0; lcd->inkmask_wr = 0;
 
         if (!saw_done) {
             std::fprintf(stderr, "pak stream never asserted done\n");

@@ -63,6 +63,10 @@ module ht943_pak_loader (
     output logic [31:0]  geotab_wdata_lo,
     output logic [21:0]  geotab_wdata_hi,
 
+    output logic         inkmask_wr,
+    output logic [15:0]  inkmask_waddr,
+    output logic [15:0]  inkmask_wdata,
+
     // Config section outputs, latched byte-by-byte and held stable.
     output logic [15:0]  cfg_clk_div,
     output logic [15:0]  cfg_timer_div,
@@ -90,14 +94,16 @@ module ht943_pak_loader (
     localparam int FRAME_OFF  = 288;
     localparam int SEGTAB_OFF = 296;
     localparam int GEOTAB_OFF = 1320;
-    localparam int PIXMAP_OFF = 5416;
-    localparam int PACK_SIZE  = 72616;
+    localparam int PIXMAP_OFF  = 5416;
+    localparam int INKMASK_OFF = 72616;  // PIXMAP_OFF + 33600*2
+    localparam int PACK_SIZE   = 110416; // INKMASK_OFF + 18900*2
 
     wire in_config = (addr >= CONFIG_OFF) && (addr < FRAME_OFF);
     wire in_frame  = (addr >= FRAME_OFF)  && (addr < SEGTAB_OFF);
     wire in_segtab = (addr >= SEGTAB_OFF) && (addr < GEOTAB_OFF);
     wire in_geotab = (addr >= GEOTAB_OFF) && (addr < PIXMAP_OFF);
-    wire in_pixmap = (addr >= PIXMAP_OFF) && (addr < PACK_SIZE);
+    wire in_pixmap = (addr >= PIXMAP_OFF) && (addr < INKMASK_OFF);
+    wire in_inkmask = (addr >= INKMASK_OFF) && (addr < PACK_SIZE);
 
     // Magic check: writes (and `done`) are disabled for the rest of the
     // stream unless bytes 0..3 spell "HTPK". A wrong file picked via F3
@@ -161,11 +167,18 @@ module ht943_pak_loader (
     wire [15:0] pixmap_idx = poff[16:1];
     wire        pix_odd    = poff[0];
 
+    // ---- inkmask: entry index + low/high byte (u16 words) ----
+    wire [16:0] addr_m_inkmask = addr - 17'(INKMASK_OFF);
+    wire [16:0] ioff        = addr_m_inkmask; // 0..37799
+    wire [15:0] inkmask_idx = ioff[16:1];
+    wire        ink_odd     = ioff[0];
+
     always @(posedge clk) begin
-        pixmap_wr <= 0;
-        segtab_wr <= 0;
-        geotab_wr <= 0;
-        done      <= 0;
+        pixmap_wr  <= 0;
+        segtab_wr  <= 0;
+        geotab_wr  <= 0;
+        inkmask_wr <= 0;
+        done       <= 0;
 
         // NOT gated by `rst`: MiSTer holds the whole core in reset for the
         // ENTIRE duration of a pak download (HT943.sv's download_reset
@@ -281,6 +294,15 @@ module ht943_pak_loader (
                     pixmap_waddr <= pixmap_idx;
                     pixmap_wdata <= le16[9:0];
                 end
+            end else if (in_inkmask) begin
+                if (!ink_odd) begin
+                    byte_lo <= data;
+                end else begin
+                    inkmask_wr    <= 1;
+                    inkmask_waddr <= inkmask_idx;
+                    inkmask_wdata <= le16;
+                end
+                // inkmask is the LAST section: pulse done on its final byte.
                 if (addr == PACK_SIZE - 1)
                     done <= 1;
             end

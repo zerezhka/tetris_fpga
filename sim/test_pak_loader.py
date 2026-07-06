@@ -114,6 +114,11 @@ def check_profile(name):
         n_mismatch = sum(1 for a, b in zip(got_pixmap, expected['pixmap']) if a != b)
         errors.append(f'pixmap mismatch ({n_mismatch}/{len(expected["pixmap"])} words)')
 
+    got_inkmask = csv_ints(got['inkmask'])
+    if got_inkmask != expected['inkmask']:
+        n_mismatch = sum(1 for a, b in zip(got_inkmask, expected['inkmask']) if a != b)
+        errors.append(f'inkmask mismatch ({n_mismatch}/{len(expected["inkmask"])} words)')
+
     return errors
 
 

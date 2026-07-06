@@ -93,7 +93,15 @@ localparam CONF_STR = {
 	// are always dimly visible under ambient light — makes a screenshot
 	// show the whole face without catching the right frame.
 	"O1,LCD persistence,On,Off;",
-	"O2,Ghost cells,Off,On;",
+	// LCD detail: Fine = full-res pre-rasterized ink mask for non-brick
+	// segments (crisp digits/icons/text); Chunky = old coarse-cell fill.
+	"O2,LCD detail,Fine,Chunky;",
+	// Ghost cells (default On at 5%): faint always-on tint of every
+	// segment, like a real reflective LCD seen at an angle. Multi-value on
+	// bits 10-11. NB: bit 11 is the top declared status bit and Main drops
+	// it on .CFG restore, so 15%/Off may not survive a reload from config
+	// — live OSD toggling is unaffected (see plan-device-packs.md).
+	"OAB,Ghost cells,5%,10%,15%,Off;",
 	// Button names for MiSTer's joystick mapper, in joystick_0 bit order
 	// starting at bit 4 (bits 0-3 are the d-pad) — must match WORD_BIT in
 	// tools/gen_mister_profiles.py: 4=Fire 5=Start 6=Sound 7=OnOff 8=Pause.
@@ -104,7 +112,7 @@ localparam CONF_STR = {
 	// v2: Scale shrank from 2 bits (O9A) to 1 (O9) when the HV-Integer
 	// values were dropped — bump discards configs saved against the old
 	// bit layout (day-one release, no installed base to protect).
-	"v,2;",
+	"v,3;",
 	"V,v",`BUILD_DATE
 };
 
@@ -297,7 +305,7 @@ always @(posedge clk_sys) begin
 	// ranges — and could even land on addr == PACK_SIZE-1 again,
 	// pulsing done and latching pak_loaded over garbage tables.
 	if (ioctl_download & ioctl_wr & (ioctl_index[5:0] == 6'd3)
-	    & (ioctl_addr < 27'd72616)) begin
+	    & (ioctl_addr < 27'd110416)) begin
 		pak_wr   <= 1;
 		pak_addr <= ioctl_addr[16:0];
 		pak_data <= ioctl_dout;
@@ -569,6 +577,9 @@ wire        pak_geotab_wr;
 wire [8:0]  pak_geotab_waddr;
 wire [31:0] pak_geotab_wdata_lo;
 wire [21:0] pak_geotab_wdata_hi;
+wire        pak_inkmask_wr;
+wire [15:0] pak_inkmask_waddr;
+wire [15:0] pak_inkmask_wdata;
 
 wire [15:0] pak_cfg_clk_div;
 wire [15:0] pak_cfg_timer_div;
@@ -597,6 +608,8 @@ ht943_pak_loader pak_loader
 	.segtab_wr(pak_segtab_wr), .segtab_waddr(pak_segtab_waddr), .segtab_wdata(pak_segtab_wdata),
 	.geotab_wr(pak_geotab_wr), .geotab_waddr(pak_geotab_waddr),
 	.geotab_wdata_lo(pak_geotab_wdata_lo), .geotab_wdata_hi(pak_geotab_wdata_hi),
+	.inkmask_wr(pak_inkmask_wr), .inkmask_waddr(pak_inkmask_waddr),
+	.inkmask_wdata(pak_inkmask_wdata),
 
 	.cfg_clk_div(pak_cfg_clk_div),
 	.cfg_timer_div(pak_cfg_timer_div),
@@ -627,7 +640,10 @@ ht943_lcd lcd
 	// LCD look toggles: bit 1 On=first value -> persist active when 0;
 	// bit 2 Off=first value -> ghost active when 1.
 	.persist_en(~status[1]),
-	.ghost_en(status[2]),
+	.fine_en(~status[2]),        // bit2=0 (first value "Fine") -> fine on
+	.ghost_lvl(status[11:10]),   // 0=5% 1=10% 2=15% 3=off; default 0
+	.inkmask_wr(pak_inkmask_wr), .inkmask_waddr(pak_inkmask_waddr),
+	.inkmask_wdata(pak_inkmask_wdata),
 	.frame_x0(cfg_frame_x0), .frame_y0(cfg_frame_y0),
 	.frame_x1(cfg_frame_x1), .frame_y1(cfg_frame_y1),
 

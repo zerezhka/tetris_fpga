@@ -93,7 +93,14 @@ module ht943_lcd #(
     //                frame. The accumulator keeps running regardless of
     //                persist_en; these flags only pick what the pixel shows.
     input  logic        persist_en,
-    input  logic        ghost_en,
+    //   ghost_lvl : intensity of the always-on faint "ghost" of every
+    //               segment (a real reflective LCD's segments seen at an
+    //               angle). 0=~5%, 1=~10%, 2=~15% toward ink, 3=off.
+    input  logic [1:0]  ghost_lvl,
+    //   fine_en : use the full-res 360x840 ink mask for non-brick segments
+    //             (crisp digits/icons/text) instead of filling the whole
+    //             coarse cell. Off = the old chunky coarse fill.
+    input  logic        fine_en,
 
     // Well-frame outer rect (360x840 raster coords). x0==x1 disables it.
     // Driven by HT943.sv's cfg_frame_* registers (fallback array indexed
@@ -117,6 +124,11 @@ module ht943_lcd #(
     input  logic [8:0]  geotab_waddr,
     input  logic [31:0] geotab_wdata_lo,
     input  logic [21:0] geotab_wdata_hi,
+
+    // Fine ink-mask write port (360x840 1bpp, 16 px/word, row-major).
+    input  logic        inkmask_wr,
+    input  logic [15:0] inkmask_waddr,
+    input  logic [15:0] inkmask_wdata,
 
     // CPU RAM read port. The rasterizer re-reads RAM every pixel.
     output logic [7:0]  ram_addr,
@@ -225,10 +237,17 @@ module ht943_lcd #(
     // LCD, and a few frames' settling before the fallback face is visible
     // is fine (see the update-FSM comment for the ramp timing).
     logic [3:0] accram [0:511];
+    // ---- fine ink mask: full-res H_VISIBLE x V_VISIBLE 1bpp raster of
+    // non-brick segment shapes, packed 16 px/word, row-major (see
+    // plan-fine-mask-renderer.md). One write port (pak loader), one
+    // registered read (render pipeline). $readmemh seeds the E88 fallback.
+    localparam int INK_WORDS = (H_VISIBLE * V_VISIBLE + 15) / 16;
+    logic [15:0] inkmask [0:INK_WORDS-1];
 
     initial begin
         $readmemh("rtl/assets/E88_8in1_pix.hex", pixmap);
         $readmemh("rtl/assets/E88_8in1_seg.hex", segtab);
+        $readmemh("rtl/assets/E88_8in1_ink.hex", inkmask);
     end
 
     // geo.hex packs the full 54-bit word per line; split it into the two
@@ -264,6 +283,9 @@ module ht943_lcd #(
     always @(posedge clk) begin
         if (upd_wr) accram[upd_widx] <= acc_new;
     end
+    always @(posedge clk) begin
+        if (inkmask_wr) inkmask[inkmask_waddr[$clog2(INK_WORDS)-1:0]] <= inkmask_wdata;
+    end
 
     // ---- S0: coarse map address ----
     // Row-major index, matching the extractor's y*cw+x write order.
@@ -274,6 +296,23 @@ module ht943_lcd #(
     // block per the Quartus-inference discipline above) ----
     logic [9:0] pix_word;
     always @(posedge clk) pix_word <= pixmap[pix_idx];
+
+    // ---- fine ink-mask read, pipelined to land at S2 alongside hx2/hy2.
+    // Fine pixel index = v_count*H_VISIBLE + h_count (the exact hi-res
+    // pixel); word address = index>>4, bit = index[3:0]. The word read is
+    // registered (S1); one extra register (S2) plus the 4-bit selector
+    // carried the same two stages makes inkmask_bit valid at S2 for the
+    // SAME pixel whose seg_word/hx2/hy2 arrive there (both derive from the
+    // h_count/v_count sampled this S0 cycle).
+    wire [19:0] fine_idx  = 20'(v_count) * H_VISIBLE + 20'(h_count);
+    wire [15:0] fine_waddr = active_raw ? fine_idx[19:4] : 16'd0;
+    logic [15:0] ink_word, ink_word2;
+    reg   [3:0]  fbit1, fbit2;
+    always @(posedge clk) ink_word  <= inkmask[fine_waddr[$clog2(INK_WORDS)-1:0]];
+    always @(posedge clk) ink_word2 <= ink_word;
+    always @(posedge clk) fbit1     <= fine_idx[3:0];
+    always @(posedge clk) fbit2     <= fbit1;
+    wire inkmask_bit = ink_word2[fbit2];  // valid at S2
 
     wire       s1_bg  = pix_word[9];
     wire [8:0] s1_idx = pix_word[8:0];
@@ -411,12 +450,14 @@ module ht943_lcd #(
                     ({1'b0, hy2} <  {1'b0, frame_y1} - FT);
     wire frame_hit = (frame_x0 != frame_x1) && fr_outer && !fr_inner;
 
-    // shape_mask: WHERE ink can go within this segment's cell (unchanged
-    // from the old binary renderer's geometry) -- brick segments only ink
-    // the frame ring / inner fill, everything else inks its whole coarse
-    // cell. acc_shade is the persistence accumulator's top 2 bits (0..3),
-    // S2-aligned like geo/seg.
-    wire       shape_mask = geo_brick ? brick_dark : 1'b1;
+    // shape_mask: WHERE ink can go within this segment's cell. Brick
+    // segments only ink the frame ring / inner fill (procedural, always).
+    // Non-brick segments: in Fine mode, the exact full-res ink-mask shape
+    // (crisp digits/icons/text); in Chunky mode, their whole coarse cell
+    // (the old blocky fill). acc_shade is the persistence accumulator's
+    // top 2 bits (0..3), S2-aligned like geo/seg/inkmask_bit.
+    wire       shape_mask = geo_brick ? brick_dark
+                                      : (fine_en ? inkmask_bit : 1'b1);
     wire [1:0] acc_shade  = acc_word[3:2];
     // on_shade: how dark this segment reads when it is (or was recently)
     // ON. With persistence, the accumulator's fading gray; without, plain
@@ -437,6 +478,7 @@ module ht943_lcd #(
     // printed well frame is bezel ink -> always 4; background is always 0.
     // A segment cell that is currently un-lit reads ghost (level 1) when
     // ghost_en, else paper -- so a screenshot reveals the whole face.
+    wire ghost_en = (ghost_lvl != 2'd3);  // 3 = ghost off
     reg [2:0] level;
     always @(posedge clk)
         level <= frame_hit         ? 3'd4 :
@@ -470,14 +512,20 @@ module ht943_lcd #(
     localparam [7:0] BG_R = 8'hC8, BG_G = 8'hD4, BG_B = 8'hB4; // level 0 (paper)
     localparam [7:0] FG_R = 8'h18, FG_G = 8'h20, FG_B = 8'h18; // level 4 (full ink)
     // Intermediate colors are elaboration-time constants (plain
-    // constant-folded division, no per-pixel multiplier/divider). Ghost
-    // (level 1) = paper blended ~5% toward ink -- barely-there, matching a
-    // real reflective LCD whose dormant segments have almost no "density"
-    // head-on and only ghost faintly at a viewing angle (see plan-device-
-    // packs.md, LCD-realism notes); MID1 (level 2) = 1/3, MID2 (3) = 2/3.
-    localparam [7:0] GH_R   = BG_R - (BG_R - FG_R) / 20;
-    localparam [7:0] GH_G   = BG_G - (BG_G - FG_G) / 20;
-    localparam [7:0] GH_B   = BG_B - (BG_B - FG_B) / 20;
+    // constant-folded division, no per-pixel multiplier/divider). The
+    // ghost tint (level 1) is OSD-selectable via ghost_lvl: paper blended
+    // ~5% / ~10% / ~15% toward ink (a real reflective LCD's dormant
+    // segments are near-invisible head-on and only ghost faintly at an
+    // angle). MID1 (level 2) = 1/3, MID2 (3) = 2/3.
+    localparam [7:0] GH5_R  = BG_R - (BG_R - FG_R) / 20;      // ~5%
+    localparam [7:0] GH5_G  = BG_G - (BG_G - FG_G) / 20;
+    localparam [7:0] GH5_B  = BG_B - (BG_B - FG_B) / 20;
+    localparam [7:0] GH10_R = BG_R - (BG_R - FG_R) / 10;      // ~10%
+    localparam [7:0] GH10_G = BG_G - (BG_G - FG_G) / 10;
+    localparam [7:0] GH10_B = BG_B - (BG_B - FG_B) / 10;
+    localparam [7:0] GH15_R = BG_R - 3 * (BG_R - FG_R) / 20;  // ~15%
+    localparam [7:0] GH15_G = BG_G - 3 * (BG_G - FG_G) / 20;
+    localparam [7:0] GH15_B = BG_B - 3 * (BG_B - FG_B) / 20;
     localparam [7:0] MID1_R = BG_R - (BG_R - FG_R) / 3;
     localparam [7:0] MID1_G = BG_G - (BG_G - FG_G) / 3;
     localparam [7:0] MID1_B = BG_B - (BG_B - FG_B) / 3;
@@ -485,11 +533,17 @@ module ht943_lcd #(
     localparam [7:0] MID2_G = BG_G - 2 * (BG_G - FG_G) / 3;
     localparam [7:0] MID2_B = BG_B - 2 * (BG_B - FG_B) / 3;
 
-    wire [7:0] shade_r = (level == 3'd0) ? BG_R   : (level == 3'd1) ? GH_R :
+    // Ghost tint chosen by ghost_lvl (0/1/2 -> 5/10/15%; 3 never reaches
+    // level 1, ghost_en is false). A per-frame constant mux, no logic cost.
+    wire [7:0] gh_r = (ghost_lvl == 2'd0) ? GH5_R : (ghost_lvl == 2'd1) ? GH10_R : GH15_R;
+    wire [7:0] gh_g = (ghost_lvl == 2'd0) ? GH5_G : (ghost_lvl == 2'd1) ? GH10_G : GH15_G;
+    wire [7:0] gh_b = (ghost_lvl == 2'd0) ? GH5_B : (ghost_lvl == 2'd1) ? GH10_B : GH15_B;
+
+    wire [7:0] shade_r = (level == 3'd0) ? BG_R   : (level == 3'd1) ? gh_r :
                          (level == 3'd2) ? MID1_R : (level == 3'd3) ? MID2_R : FG_R;
-    wire [7:0] shade_g = (level == 3'd0) ? BG_G   : (level == 3'd1) ? GH_G :
+    wire [7:0] shade_g = (level == 3'd0) ? BG_G   : (level == 3'd1) ? gh_g :
                          (level == 3'd2) ? MID1_G : (level == 3'd3) ? MID2_G : FG_G;
-    wire [7:0] shade_b = (level == 3'd0) ? BG_B   : (level == 3'd1) ? GH_B :
+    wire [7:0] shade_b = (level == 3'd0) ? BG_B   : (level == 3'd1) ? gh_b :
                          (level == 3'd2) ? MID1_B : (level == 3'd3) ? MID2_B : FG_B;
 
     assign R = !d_active[2] ? 8'h00 : shade_r;
