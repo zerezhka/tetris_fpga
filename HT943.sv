@@ -65,6 +65,12 @@ localparam CONF_STR = {
 	"FC3,PAK,Load Cartridge;",
 	"FC1,BIN,Load ROM (raw);",
 	"FC2,SRO,Load Sound ROM (raw);",
+	// Savestate (plan-savestates.md): the whole ~150-byte machine state as a
+	// .sav "cartridge save" at ioctl_index 4. Plain F (NOT FC/remember): the
+	// remembered file is global, so auto-reloading it across a different
+	// cartridge would inject the wrong game's state — the user loads it to
+	// resume. Autosave still writes it on OSD-open (see SAVESTATE section).
+	"F4,SAV,Load Savestate;",
 	"-;",
 	// O68 = status bits [8:6]. NOT O01: bit 0 is the T0/R0 Reset button —
 	// with the profile on bits [1:0], selecting profile 1 or 3 held the
@@ -137,6 +143,15 @@ wire        ioctl_wr;
 wire [26:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 
+// ioctl UPLOAD (savestate save) signals — declared here so the hps_io
+// instance can reference them; driven in the SAVESTATE section below.
+wire        ioctl_upload;      // from hps_io: active upload
+wire        ioctl_rd;          // from hps_io: read strobe (unused)
+wire        ss_upload_req;     // to hps_io: request a save
+wire  [7:0] ss_upload_index;   // to hps_io: save-file index
+wire  [7:0] ss_din;            // to hps_io: state byte at ioctl_addr
+wire  [7:0] core_ss_rdata;     // from core: SAVE read mux
+
 // Gamma bus shared between hps_io and arcade_video
 wire [21:0] gamma_bus;
 
@@ -162,7 +177,14 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ioctl_index(ioctl_index),
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
-	.ioctl_dout(ioctl_dout)
+	.ioctl_dout(ioctl_dout),
+
+	// Savestate save (upload) — see SAVESTATE section.
+	.ioctl_upload(ioctl_upload),
+	.ioctl_upload_req(ss_upload_req),
+	.ioctl_upload_index(ss_upload_index),
+	.ioctl_din(ss_din),
+	.ioctl_rd(ioctl_rd)
 );
 
 ///////////////////////   CLOCKS   ///////////////////////////////
@@ -822,6 +844,48 @@ wire [5:0]  cpu_snd_note_ctr;
 wire [7:0]  cpu_snd_note;
 wire [7:0]  cpu_snd_tick_note;
 
+///////////////////////   SAVESTATE   ////////////////////////////
+
+// plan-savestates.md: the whole ~150-byte machine state (ram + registers) is
+// a .sav "cartridge save" at ioctl_index 4. LOAD streams the .sav into the
+// core's ss_buf and applies it on the reset that download_reset holds through
+// the download; autosave uploads the live state (ss_rdata) when the OSD opens
+// after the game has advanced. See ht943_core.sv's ss_* ports.
+wire        ss_dl = ioctl_download & (ioctl_index[5:0] == 6'd4);
+wire        core_ss_wr    = ss_dl & ioctl_wr;
+wire [7:0]  core_ss_waddr = ioctl_addr[7:0];
+wire [7:0]  core_ss_wdata = ioctl_dout;
+
+// Apply latch: hold ss_apply across the whole reset window that follows a
+// .sav download (download_reset keeps `reset` high through and ~100ms after
+// it), then clear once the CPU starts running so a later manual reset gives a
+// fresh game rather than re-injecting the savestate.
+reg ss_apply = 0, ss_pending = 0;
+always @(posedge clk_sys) begin
+	if (ss_dl)      ss_pending <= 1'b1;
+	if (ss_pending) ss_apply   <= 1'b1;
+	if (!reset) begin
+		ss_apply   <= 1'b0;
+		ss_pending <= 1'b0;
+	end
+end
+
+// Autosave: the state is dirty once the game advances with the OSD closed;
+// while the OSD is open (the only time HPS reads ioctl_upload_req) request an
+// upload, which streams ss_rdata out to a .sav. Clear dirty when the upload
+// starts (one save per OSD visit) or right after a load.
+reg dirty = 0, ioctl_upload_d = 0;
+always @(posedge clk_sys) begin
+	ioctl_upload_d <= ioctl_upload;
+	if (cpu_ce & ~OSD_STATUS & ~reset)  dirty <= 1'b1;
+	if (ioctl_upload & ~ioctl_upload_d) dirty <= 1'b0;
+	if (ss_apply)                       dirty <= 1'b0;
+end
+assign ss_upload_req   = OSD_STATUS & dirty;
+assign ss_upload_index = 8'd4;
+assign ss_din          = core_ss_rdata;
+wire [7:0] ss_raddr    = ioctl_addr[7:0];
+
 ht943_core ht943_core
 (
 	.clk(clk_sys),
@@ -847,6 +911,9 @@ ht943_core ht943_core
 	.cfg_wr  (core_cfg_wr),
 	.cfg_addr(core_cfg_addr),
 	.cfg_data(core_cfg_data),
+
+	.ss_wr(core_ss_wr), .ss_waddr(core_ss_waddr), .ss_wdata(core_ss_wdata),
+	.ss_apply(ss_apply), .ss_raddr(ss_raddr), .ss_rdata(core_ss_rdata),
 
 	.pp_in(pp_in), .pm_in(pm_in), .ps_in(ps_in),
 
