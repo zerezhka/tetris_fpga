@@ -66,6 +66,21 @@ module ht943_core #(
     input  logic [3:0]  cfg_addr,
     input  logic [7:0]  cfg_data,
 
+    // Savestate (plan-savestates.md). A flat SS_BYTES-byte view of the whole
+    // architectural state (ram + registers), packed identically on the read
+    // (save) and write (load) sides. LOAD streams bytes into ss_buf via
+    // ss_wr/ss_waddr/ss_wdata (like a ROM download, not gated by rst); with
+    // ss_apply held during the following reset window the reset branch inits
+    // ram/regs FROM ss_buf instead of zeros. SAVE reads ss_rdata[ss_raddr]
+    // combinationally. When ss_apply=0 and ss_wr=0 the module is inert and
+    // behaviour is byte-identical to before (regression stays green).
+    input  logic        ss_wr,
+    input  logic [7:0]  ss_waddr,
+    input  logic [7:0]  ss_wdata,
+    input  logic        ss_apply,
+    input  logic [7:0]  ss_raddr,
+    output logic [7:0]  ss_rdata,
+
     input  logic [3:0]  pp_in, pm_in, ps_in,
 
     // trace outputs — reflect state BEFORE executing the instruction at `pc`
@@ -247,6 +262,46 @@ module ht943_core #(
     // this is cheap enough to force into LUT-based storage and sidestep
     // block-RAM inference entirely.
     (* ramstyle = "logic" *) logic [3:0] ram [0:255];
+
+    // ---- savestate: flat byte view of the architectural state ----
+    // Layout (kept identical between the ss_rdata read mux below and the
+    // reset-branch unpack): bytes 0..127 = ram (2 nibbles/byte, low nibble =
+    // even index), then the registers. SS_BYTES-1 is the last register byte.
+    localparam int SS_BYTES = 150;
+    (* ramstyle = "logic" *) logic [7:0] ss_buf [0:SS_BYTES-1];
+
+    // Read mux (SAVE): pack the LIVE state so HPS uploads current contents.
+    always_comb begin
+        if (ss_raddr < 8'd128)
+            ss_rdata = {ram[{ss_raddr[6:0], 1'b1}], ram[{ss_raddr[6:0], 1'b0}]};
+        else begin
+            case (ss_raddr)
+                8'd128: ss_rdata = r_pc[7:0];
+                8'd129: ss_rdata = {4'b0, r_pc[11:8]};
+                8'd130: ss_rdata = {4'b0, r_acc};
+                8'd131: ss_rdata = {r_wr[1], r_wr[0]};
+                8'd132: ss_rdata = {r_wr[3], r_wr[2]};
+                8'd133: ss_rdata = {4'b0, r_wr[4]};
+                8'd134: ss_rdata = r_stack[7:0];
+                8'd135: ss_rdata = {3'b0, r_stack[12:8]};
+                8'd136: ss_rdata = {2'b0, r_ei, r_cf, r_tf, r_ef, r_halt, r_timerf};
+                8'd137: ss_rdata = r_tc;
+                8'd138: ss_rdata = r_timer_cnt[7:0];
+                8'd139: ss_rdata = r_timer_cnt[15:8];
+                8'd140: ss_rdata = {4'b0, r_pa};
+                8'd141: ss_rdata = {r_pm_prev, r_pp_prev};
+                8'd142: ss_rdata = {4'b0, r_ps_prev};
+                8'd143: ss_rdata = {4'b0, r_snd_channel};
+                8'd144: ss_rdata = {2'b0, r_snd_note_ctr};
+                8'd145: ss_rdata = r_snd_clk_cnt[7:0];
+                8'd146: ss_rdata = r_snd_clk_cnt[15:8];
+                8'd147: ss_rdata = r_snd_clk_cnt[23:16];
+                8'd148: ss_rdata = r_snd_tick_note;
+                8'd149: ss_rdata = {4'b0, r_snd_on, r_snd_repeat, r_snd_tick, r_snd_tick_fx};
+                default: ss_rdata = 8'h0;
+            endcase
+        end
+    end
 
     // Trace outputs reflect the address/opcode actually about to execute,
     // which is cur_pc/op (post interrupt-redirect) rather than r_pc: an
@@ -633,7 +688,12 @@ module ht943_core #(
         // different read expressions (if(rst) rom16[12'h0] else
         // rom16[w_next_cur_pc]); a plain always_ff reading one address
         // expression is the canonical synchronous-read shape it wants.
-        if (rst) w_next_cur_pc = 12'h0;
+        // During a savestate-apply reset, prime the prefetch from the
+        // RESTORED pc (same slice the reset branch loads into r_pc) rather
+        // than 0 — otherwise the first post-restore fetch would read the
+        // opcode at addr 0 instead of where the saved game was executing.
+        if (rst) w_next_cur_pc = ss_apply ? {ss_buf[129][3:0], ss_buf[128]}
+                                          : 12'h0;
     end
 
     // rom16's write request, computed combinationally and serviced by a
@@ -701,6 +761,9 @@ module ht943_core #(
         if (srom_wr) sound_rom[srom_addr] <= srom_data;
         if (spd_wr)  speed_div[spd_addr]  <= spd_data;
         if (fx_wr)   sound_fx[fx_addr]    <= fx_data;
+        // Savestate load buffer fills like a ROM download (not gated by rst);
+        // the reset branch below applies it when ss_apply is held.
+        if (ss_wr)   ss_buf[ss_waddr]     <= ss_wdata;
 
         if (rst) begin
             r_timer_div      <= TIMER_DIV;
@@ -722,33 +785,45 @@ module ht943_core #(
         end
 
         if (rst) begin
-            r_pc <= 12'h0;
-            r_acc <= 4'h0;
-            for (int i = 0; i < 5; i++) r_wr[i] <= 4'h0;
-            r_stack <= 13'h0;
-            r_ei <= 1'b0;
-            r_cf <= 1'b0;
-            r_tf <= 1'b0;
-            r_ef <= 1'b0;
-            r_halt <= 1'b0;
-            r_timerf <= 1'b0;
-            r_tc <= 8'h0;
-            r_timer_cnt <= 16'sd0;
-            r_pa <= 4'h0;
-            r_pp_prev <= PP_PULLUP;
-            r_pm_prev <= PM_PULLUP;
-            r_ps_prev <= PS_PULLUP;
-            r_snd_on <= 1'b0;
-            r_snd_repeat <= 1'b0;
-            r_snd_channel <= 4'h0;
-            r_snd_note_ctr <= 6'h0;
-            r_snd_clk_cnt <= 24'sd0;
-            r_snd_tick <= 1'b0;
-            r_snd_tick_note <= 8'h0;
-            r_snd_tick_fx <= 1'b0;
+            // ss_apply held (a savestate was just streamed into ss_buf) ->
+            // init architectural state FROM ss_buf, using the SAME byte layout
+            // as the ss_rdata read mux. Otherwise the usual power-on defaults.
+            // Both branches run every held-reset cycle from a stable source,
+            // so there is no injection-vs-reset race; ss_apply=0 => identical
+            // to the old reset (regression-safe).
+            r_pc     <= ss_apply ? {ss_buf[129][3:0], ss_buf[128]} : 12'h0;
+            r_acc    <= ss_apply ? ss_buf[130][3:0] : 4'h0;
+            r_wr[0]  <= ss_apply ? ss_buf[131][3:0] : 4'h0;
+            r_wr[1]  <= ss_apply ? ss_buf[131][7:4] : 4'h0;
+            r_wr[2]  <= ss_apply ? ss_buf[132][3:0] : 4'h0;
+            r_wr[3]  <= ss_apply ? ss_buf[132][7:4] : 4'h0;
+            r_wr[4]  <= ss_apply ? ss_buf[133][3:0] : 4'h0;
+            r_stack  <= ss_apply ? {ss_buf[135][4:0], ss_buf[134]} : 13'h0;
+            r_ei     <= ss_apply ? ss_buf[136][5] : 1'b0;
+            r_cf     <= ss_apply ? ss_buf[136][4] : 1'b0;
+            r_tf     <= ss_apply ? ss_buf[136][3] : 1'b0;
+            r_ef     <= ss_apply ? ss_buf[136][2] : 1'b0;
+            r_halt   <= ss_apply ? ss_buf[136][1] : 1'b0;
+            r_timerf <= ss_apply ? ss_buf[136][0] : 1'b0;
+            r_tc     <= ss_apply ? ss_buf[137] : 8'h0;
+            r_timer_cnt <= ss_apply ? 16'({ss_buf[139], ss_buf[138]}) : 16'sd0;
+            r_pa     <= ss_apply ? ss_buf[140][3:0] : 4'h0;
+            r_pp_prev <= ss_apply ? ss_buf[141][3:0] : PP_PULLUP;
+            r_pm_prev <= ss_apply ? ss_buf[141][7:4] : PM_PULLUP;
+            r_ps_prev <= ss_apply ? ss_buf[142][3:0] : PS_PULLUP;
+            r_snd_channel  <= ss_apply ? ss_buf[143][3:0] : 4'h0;
+            r_snd_note_ctr <= ss_apply ? ss_buf[144][5:0] : 6'h0;
+            r_snd_clk_cnt  <= ss_apply ? 24'({ss_buf[147], ss_buf[146], ss_buf[145]}) : 24'sd0;
+            r_snd_tick_note <= ss_apply ? ss_buf[148] : 8'h0;
+            r_snd_on     <= ss_apply ? ss_buf[149][3] : 1'b0;
+            r_snd_repeat <= ss_apply ? ss_buf[149][2] : 1'b0;
+            r_snd_tick   <= ss_apply ? ss_buf[149][1] : 1'b0;
+            r_snd_tick_fx <= ss_apply ? ss_buf[149][0] : 1'b0;
             // HT943._reset() zeroes the RAM too (not just registers) —
             // without this a mid-game reset would resume with stale VRAM.
-            for (int i = 0; i < 256; i++) ram[i] <= 4'h0;
+            for (int i = 0; i < 256; i++)
+                ram[i] <= ss_apply ? ((i & 1) ? ss_buf[i>>1][7:4]
+                                             : ss_buf[i>>1][3:0]) : 4'h0;
         end else if (ce) begin
             r_pc <= n_pc;
             r_acc <= n_acc;

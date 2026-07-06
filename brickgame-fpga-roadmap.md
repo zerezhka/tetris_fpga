@@ -532,13 +532,19 @@ playfield — exactly what a homebrew tetris needs).
 Toolchain reality check:
 - **No C for this chip.** Holtek's HT-IDE3000 ships a C compiler
   (Cross-C/HT-C) only for the 8-bit HT48/HT66 families; the 4-bit
-  HT44xxx/HT943 line is assembly-only. Rust/Zig are out of the question —
-  no LLVM backend exists for a 4-bit accumulator machine, and with 4-bit
-  registers, a 12-bit PC and paged RAM there's nothing for a high-level
-  compiler to stand on. Realistic path: HT-IDE3000 asm under Wine, or —
-  nicer — a tiny Python assembler in tools/ (the instruction table already
-  exists in the disassembler and in ht943_core.sv's decoder; an assembler
-  is its mirror).
+  HT44xxx/HT943 line is assembly-only. Rust/Zig are impractical — but NOT
+  because of the 4-bit data width (Zig has native `u4`/`i4`/`uN`, so the
+  data model is expressible). The real blockers are: (a) **no codegen
+  backend** — LLVM's (and Zig's self-hosted) targets assume ≥8-bit
+  byte-addressable memory, general registers and a stack pointer; a Harvard
+  single-accumulator machine has no lowering path, so a backend would be a
+  research project; (b) the **1-level hardware return stack** (`r_stack` =
+  `{carry, pc[11:0]}`, one slot) breaks every compiler's stack-based calling
+  convention — no recursion/nesting without a hand-synthesised software
+  stack in the 256-nibble RAM that also holds game state. Realistic path:
+  HT-IDE3000 asm under Wine, or — nicer — a tiny Python assembler in tools/
+  (the instruction table already exists in the disassembler and in
+  ht943_core.sv's decoder; an assembler is its mirror).
 - **Dev loop**: asm → assemble to .bin → run in BrickEmuPy/Verilator tb
   (bit-exact trace + LCD segment dump) → Load ROM on the FPGA core.
   No silicon needed at any step.

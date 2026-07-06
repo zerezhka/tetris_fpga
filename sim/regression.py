@@ -172,6 +172,10 @@ CASES = [
      lambda: script_case('test_pak_loader.py')),
     ('LCD smoke: power-on fallback == E88 pak render',
      lambda: script_case('test_lcd_smoke.py')),
+    # Savestate save/load: the ss_rdata read mux and reset-branch unpack in
+    # ht943_core.sv must share one byte layout, or a restored game diverges.
+    ('Savestate roundtrip (Verilator, E88)',
+     lambda: script_case('test_savestate.py')),
     ('E23PlusMarkII96in1 (fetch/decode/execute)', lambda: real_rom_case('E23PlusMarkII96in1')),
     ('E88_8in1 (fetch/decode/execute)', lambda: real_rom_case('E88_8in1')),
     ('GA888 (fetch/decode/execute)', lambda: real_rom_case('GA888')),
