@@ -601,6 +601,34 @@ Toolchain reality check:
 
 ---
 
+## 8. Idea parking lot
+
+- **HT943_2P — a two-player core à la `Gameboy_2P` / `GBC_2P`.** MiSTer's
+  Gameboy_2P core instantiates two GB cores side by side, wires joystick 0
+  and joystick 1 to them independently, and composites the two LCD outputs
+  horizontally (one screen, two handhelds). Same shape works here: two
+  `ht943` CPU instances + two `ht943_lcd` scan chains, P1/P2 inputs, output
+  720×840 side-by-side (or 360×1680 stacked). These brick games have no
+  link cable, so — exactly like Gameboy_2P running a non-link game — it's
+  two *independent* handhelds on one screen: head-to-head Tetris/race on
+  separate units, no interaction needed.
+  - **Key cheap-2P insight:** both players run the **same loaded game**, so
+    the big LCD face tables (`pixmap` 67 KB, `inkmask` 38 KB, segtab/geotab)
+    are IDENTICAL and can be **shared read-only** between the two renderers.
+    Only the tiny per-player state duplicates: CPU data RAM (256×4) and the
+    persistence accumulator (`accram` 512×4). So 2P is nearly free on M10K —
+    it does NOT double the ~28% face-RAM footprint, just adds two small
+    scratch RAMs + a second CPU (CPU logic is tiny). Video path composites
+    two 360-wide scans.
+  - **Open questions:** (a) shared single pak/bin for both, or two loads?
+    Shared is simplest and matches the "same game head-to-head" use; (b) do
+    we want a synchronized start (both reset together) — trivial; (c) menu:
+    a `_2P` build like MiSTer ships (`HT943_2P.rbf`) vs a runtime OSD toggle
+    (toggle is harder — video timing/compositor changes). MiSTer convention
+    is a separate `_2P` rbf, which is the low-risk path.
+
+---
+
 ## References
 
 [^10^]: azya52, "BrickEmuPy", GitHub. https://github.com/azya52/BrickEmuPy
