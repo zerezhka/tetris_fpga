@@ -12,9 +12,11 @@
 //     one-write-port-per-table Quartus-inference discipline;
 //   - latches the config section into cfg_* output registers, held
 //     stable until the next pak load;
-//   - pulses `done` for one cycle when the last pixmap byte lands, so
-//     HT943.sv can latch cfg_* into its own registers and set its
-//     pak_loaded flag (see HT943.sv's CONFIGURATION section).
+//   - drives core_rom / core_srom from the embedded program/sound ROM
+//     (v3 cartridge sections), byte-addressed;
+//   - pulses `done` for one cycle when the last byte of the final section
+//     (sound, v3) lands, so HT943.sv can latch cfg_* into its own
+//     registers and set its pak_loaded flag (see its CONFIGURATION section).
 //
 // Section layout matches tools/gen_device_pack.py exactly (kept in sync
 // by construction — both sides hardcode the same byte offsets rather
@@ -33,6 +35,9 @@
 //   [296      .. 1320) segtab  512 x u16
 //   [1320     .. 5416) geotab  512 x u64 (54 bits used)
 //   [5416     .. 72616) pixmap  33600 x u16
+//   [72616    ..110416) inkmask 18900 x u16 (360x840 1bpp non-brick shapes)
+//   [110416   ..114512) rom     4096 x u8  (program ROM -> core_rom)  (v3)
+//   [114512   ..115536) sound   1024 x u8  (.srom, 640 used -> core_srom) (v3)
 //
 // Quartus-17 inference note: none of this module's own storage is a
 // memory (cfg_* are plain registers, word_acc is a small byte-lane
@@ -67,6 +72,19 @@ module ht943_pak_loader (
     output logic [15:0]  inkmask_waddr,
     output logic [15:0]  inkmask_wdata,
 
+    // Cartridge sections (v3): program ROM -> core_rom, sound ROM ->
+    // core_srom. Byte-wide, one write per streamed byte (these RAMs are
+    // byte-addressed, unlike the 16-bit-word LCD tables above), so no
+    // low/high latch. HT943.sv ORs these into the same core_rom/core_srom
+    // write path the FC1/FC2 .bin/.sro loaders drive.
+    output logic         rom_wr,
+    output logic [11:0]  rom_waddr,
+    output logic [7:0]   rom_wdata,
+
+    output logic         srom_wr,
+    output logic [9:0]   srom_waddr,
+    output logic [7:0]   srom_wdata,
+
     // Config section outputs, latched byte-by-byte and held stable.
     output logic [15:0]  cfg_clk_div,
     output logic [15:0]  cfg_timer_div,
@@ -96,14 +114,18 @@ module ht943_pak_loader (
     localparam int GEOTAB_OFF = 1320;
     localparam int PIXMAP_OFF  = 5416;
     localparam int INKMASK_OFF = 72616;  // PIXMAP_OFF + 33600*2
-    localparam int PACK_SIZE   = 110416; // INKMASK_OFF + 18900*2
+    localparam int ROM_OFF     = 110416; // INKMASK_OFF + 18900*2
+    localparam int SOUND_OFF   = 114512; // ROM_OFF + 4096
+    localparam int PACK_SIZE   = 115536; // SOUND_OFF + 1024
 
     wire in_config = (addr >= CONFIG_OFF) && (addr < FRAME_OFF);
     wire in_frame  = (addr >= FRAME_OFF)  && (addr < SEGTAB_OFF);
     wire in_segtab = (addr >= SEGTAB_OFF) && (addr < GEOTAB_OFF);
     wire in_geotab = (addr >= GEOTAB_OFF) && (addr < PIXMAP_OFF);
     wire in_pixmap = (addr >= PIXMAP_OFF) && (addr < INKMASK_OFF);
-    wire in_inkmask = (addr >= INKMASK_OFF) && (addr < PACK_SIZE);
+    wire in_inkmask = (addr >= INKMASK_OFF) && (addr < ROM_OFF);
+    wire in_rom     = (addr >= ROM_OFF)     && (addr < SOUND_OFF);
+    wire in_sound   = (addr >= SOUND_OFF)   && (addr < PACK_SIZE);
 
     // Magic check: writes (and `done`) are disabled for the rest of the
     // stream unless bytes 0..3 spell "HTPK". A wrong file picked via F3
@@ -173,11 +195,17 @@ module ht943_pak_loader (
     wire [15:0] inkmask_idx = ioff[16:1];
     wire        ink_odd     = ioff[0];
 
+    // ---- rom / sound: byte-addressed, one write per byte ----
+    wire [16:0] addr_m_rom   = addr - 17'(ROM_OFF);   // 0..4095
+    wire [16:0] addr_m_sound = addr - 17'(SOUND_OFF); // 0..1023
+
     always @(posedge clk) begin
         pixmap_wr  <= 0;
         segtab_wr  <= 0;
         geotab_wr  <= 0;
         inkmask_wr <= 0;
+        rom_wr     <= 0;
+        srom_wr    <= 0;
         done       <= 0;
 
         // NOT gated by `rst`: MiSTer holds the whole core in reset for the
@@ -302,7 +330,15 @@ module ht943_pak_loader (
                     inkmask_waddr <= inkmask_idx;
                     inkmask_wdata <= le16;
                 end
-                // inkmask is the LAST section: pulse done on its final byte.
+            end else if (in_rom) begin
+                rom_wr    <= 1;
+                rom_waddr <= addr_m_rom[11:0];
+                rom_wdata <= data;
+            end else if (in_sound) begin
+                srom_wr    <= 1;
+                srom_waddr <= addr_m_sound[9:0];
+                srom_wdata <= data;
+                // sound is the LAST section (v3): pulse done on its final byte.
                 if (addr == PACK_SIZE - 1)
                     done <= 1;
             end

@@ -96,8 +96,17 @@ def build_profile(name):
     # CRC32 (zlib/IEEE) of the ROM dump, for hardware profile autodetect:
     # HT943.sv CRCs the .bin as it streams in over ioctl and, when the OSD
     # selector is on "Auto", picks the matching profile automatically.
-    with open(os.path.join(BRICKEMUPY, 'assets', f'{name}.bin'), 'rb') as f:
+    rom_path = os.path.join(BRICKEMUPY, 'assets', f'{name}.bin')
+    with open(rom_path, 'rb') as f:
         rom_crc = zlib.crc32(f.read()) & 0xFFFFFFFF
+
+    # Sound ROM (.srom) path, resolved from the .brick's mask_options — the
+    # v3 cartridge pak embeds these bytes so a single .pak carries program +
+    # sound + face (see plan-cartridge-pak-v3.md). It's relative to the
+    # BrickEmuPy dir (e.g. "./assets/E23PlusMarkII96in1.srom"); may be null.
+    srom_rel = mask.get('sound_rom_path')
+    sound_rom_path = os.path.normpath(os.path.join(BRICKEMUPY, srom_rel)) \
+        if srom_rel else None
 
     return {
         'name': name,
@@ -112,6 +121,8 @@ def build_profile(name):
         'reset_jmap': reset_jmap,
         'face_path': cfg['face_path'],
         'rom_crc': rom_crc,
+        'rom_path': rom_path,
+        'sound_rom_path': sound_rom_path,
     }
 
 

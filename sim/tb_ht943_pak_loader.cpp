@@ -46,16 +46,22 @@ int main(int argc, char** argv) {
     const int PIX_WORDS = 33600;
     const int NUM_SEGS = 512;
     const int INK_WORDS = 18900;  // (360*840+15)/16
+    const int ROM_BYTES = 4096;   // v3 cartridge: program ROM
+    const int SOUND_BYTES = 1024; // v3 cartridge: sound ROM (640 used)
     std::vector<unsigned> pixmap(PIX_WORDS, 0);
     std::vector<unsigned> segtab(NUM_SEGS, 0);
     std::vector<unsigned long long> geotab(NUM_SEGS, 0);
     std::vector<unsigned> inkmask(INK_WORDS, 0);
+    std::vector<unsigned> rom(ROM_BYTES, 0);
+    std::vector<unsigned> sound(SOUND_BYTES, 0);
 
     auto tick = [&]() {
         top->clk = 0; top->eval();
         top->clk = 1; top->eval();
         if (top->pixmap_wr) pixmap[top->pixmap_waddr] = top->pixmap_wdata;
         if (top->inkmask_wr) inkmask[top->inkmask_waddr] = top->inkmask_wdata;
+        if (top->rom_wr) rom[top->rom_waddr] = top->rom_wdata;
+        if (top->srom_wr) sound[top->srom_waddr] = top->srom_wdata;
         if (top->segtab_wr) segtab[top->segtab_waddr] = top->segtab_wdata;
         if (top->geotab_wr) {
             unsigned long long lo = top->geotab_wdata_lo;
@@ -151,6 +157,14 @@ int main(int argc, char** argv) {
 
     std::fprintf(out, "inkmask=");
     for (int i = 0; i < INK_WORDS; i++) std::fprintf(out, "%s%u", i ? "," : "", inkmask[i]);
+    std::fprintf(out, "\n");
+
+    std::fprintf(out, "rom=");
+    for (int i = 0; i < ROM_BYTES; i++) std::fprintf(out, "%s%u", i ? "," : "", rom[i]);
+    std::fprintf(out, "\n");
+
+    std::fprintf(out, "sound=");
+    for (int i = 0; i < SOUND_BYTES; i++) std::fprintf(out, "%s%u", i ? "," : "", sound[i]);
     std::fprintf(out, "\n");
 
     fclose(out);

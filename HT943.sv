@@ -290,6 +290,22 @@ always @(posedge clk_sys) begin
 			end
 		endcase
 	end
+
+	// v3 cartridge: fold the pak's embedded program/sound ROM into the same
+	// core_rom/core_srom write path. Mutually exclusive with the FC1/FC2
+	// branches above — a pak stream is ioctl_index 3, so those cases stay
+	// idle while the loader emits these (and a bare .bin/.sro load never
+	// feeds pak_loader, so pak_rom_wr/pak_srom_wr stay low then).
+	if (pak_rom_wr) begin
+		core_rom_wr   <= 1;
+		core_rom_addr <= pak_rom_waddr;
+		core_rom_data <= pak_rom_wdata;
+	end
+	if (pak_srom_wr) begin
+		core_srom_wr   <= 1;
+		core_srom_addr <= pak_srom_waddr;
+		core_srom_data <= pak_srom_wdata;
+	end
 end
 
 ///////////////////////   PAK DOWNLOAD   //////////////////////////
@@ -309,7 +325,7 @@ always @(posedge clk_sys) begin
 	// ranges — and could even land on addr == PACK_SIZE-1 again,
 	// pulsing done and latching pak_loaded over garbage tables.
 	if (ioctl_download & ioctl_wr & (ioctl_index[5:0] == 6'd3)
-	    & (ioctl_addr < 27'd110416)) begin
+	    & (ioctl_addr < 27'd115536)) begin
 		pak_wr   <= 1;
 		pak_addr <= ioctl_addr[16:0];
 		pak_data <= ioctl_dout;
@@ -585,6 +601,16 @@ wire        pak_inkmask_wr;
 wire [15:0] pak_inkmask_waddr;
 wire [15:0] pak_inkmask_wdata;
 
+// v3 cartridge: program/sound ROM streamed out of the pak, ORed into the
+// core_rom/core_srom write path (see ROM/SROM DOWNLOAD) so one .pak load
+// brings up program + sound + face without the separate FC1/FC2 loaders.
+wire        pak_rom_wr;
+wire [11:0] pak_rom_waddr;
+wire [7:0]  pak_rom_wdata;
+wire        pak_srom_wr;
+wire [9:0]  pak_srom_waddr;
+wire [7:0]  pak_srom_wdata;
+
 wire [15:0] pak_cfg_clk_div;
 wire [15:0] pak_cfg_timer_div;
 wire [3:0]  pak_cfg_pp_wakeup, pak_cfg_pm_wakeup, pak_cfg_ps_wakeup;
@@ -614,6 +640,9 @@ ht943_pak_loader pak_loader
 	.geotab_wdata_lo(pak_geotab_wdata_lo), .geotab_wdata_hi(pak_geotab_wdata_hi),
 	.inkmask_wr(pak_inkmask_wr), .inkmask_waddr(pak_inkmask_waddr),
 	.inkmask_wdata(pak_inkmask_wdata),
+
+	.rom_wr(pak_rom_wr),   .rom_waddr(pak_rom_waddr),   .rom_wdata(pak_rom_wdata),
+	.srom_wr(pak_srom_wr), .srom_waddr(pak_srom_waddr), .srom_wdata(pak_srom_wdata),
 
 	.cfg_clk_div(pak_cfg_clk_div),
 	.cfg_timer_div(pak_cfg_timer_div),

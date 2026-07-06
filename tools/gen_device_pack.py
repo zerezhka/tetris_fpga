@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(ROOT, 'tools'))
 from gen_mister_profiles import build_profile, gen_segment_maps  # noqa: E402
 
 MAGIC = b'HTPK'
-VERSION = 2  # v2: appended the fine ink-mask section (see below)
+VERSION = 3  # v3: appended program-ROM + sound-ROM (cartridge pak, below)
 
 HEADER_SIZE = 32
 CONFIG_SIZE = 256
@@ -66,9 +66,17 @@ PIXMAP_SIZE = PIXMAP_WORDS * 2
 INK_HW, INK_HH = 360, 840
 INKMASK_WORDS = (INK_HW * INK_HH + 15) // 16
 INKMASK_SIZE = INKMASK_WORDS * 2
+# Cartridge sections (v3): program ROM (core_rom, 12-bit addr = 4096 B) and
+# sound ROM (core_srom, 10-bit addr; the .srom dumps are 640 B, zero-padded
+# to the full 1024 B window). Appended AFTER inkmask at hardcoded offsets —
+# like inkmask, no header field; ht943_pak_loader.sv hardcodes the same
+# layout. Embedding them makes one .pak a self-contained cartridge, so a
+# single file load brings up program + sound + face (plan-cartridge-pak-v3).
+ROM_SIZE = 4096
+SOUND_SIZE = 1024
 
 PACK_SIZE = HEADER_SIZE + CONFIG_SIZE + FRAME_SIZE + SEGTAB_SIZE + \
-    GEOTAB_SIZE + PIXMAP_SIZE + INKMASK_SIZE
+    GEOTAB_SIZE + PIXMAP_SIZE + INKMASK_SIZE + ROM_SIZE + SOUND_SIZE
 
 
 def read_hex_words(path):
@@ -128,6 +136,23 @@ def build_inkmask_bytes(ink_words):
     return struct.pack(f'<{INKMASK_WORDS}H', *ink_words)
 
 
+def _read_fixed(path, size, what):
+    """Read a binary blob and fit it to a fixed `size`: zero-pad if short
+    (the .srom dumps are 640 B in a 1024 B window), error if too long."""
+    data = b'' if path is None else open(path, 'rb').read()
+    if len(data) > size:
+        raise ValueError(f'{what} is {len(data)} B, exceeds {size} B')
+    return data + b'\x00' * (size - len(data))
+
+
+def build_rom_bytes(profile):
+    return _read_fixed(profile.get('rom_path'), ROM_SIZE, 'program ROM')
+
+
+def build_sound_bytes(profile):
+    return _read_fixed(profile.get('sound_rom_path'), SOUND_SIZE, 'sound ROM')
+
+
 def build_pack(name, regen_assets=False):
     """Build a complete .pak byte string for BrickEmuPy asset `name`."""
     profile = build_profile(name)
@@ -148,6 +173,8 @@ def build_pack(name, regen_assets=False):
     geotab_bytes = build_geotab_bytes(geo_words)
     pixmap_bytes = build_pixmap_bytes(pix_words)
     inkmask_bytes = build_inkmask_bytes(ink_words)
+    rom_bytes = build_rom_bytes(profile)
+    sound_bytes = build_sound_bytes(profile)
 
     config_off = HEADER_SIZE
     frame_off = config_off + CONFIG_SIZE
@@ -163,7 +190,7 @@ def build_pack(name, regen_assets=False):
     assert len(header) == HEADER_SIZE
 
     pak = header + config_bytes + frame_bytes + segtab_bytes + \
-        geotab_bytes + pixmap_bytes + inkmask_bytes
+        geotab_bytes + pixmap_bytes + inkmask_bytes + rom_bytes + sound_bytes
     assert len(pak) == PACK_SIZE, f'{len(pak)} != {PACK_SIZE}'
     return pak
 
@@ -197,6 +224,10 @@ def parse_pack(data):
     inkmask_off = pixmap_off + PIXMAP_SIZE
     inkmask = struct.unpack(f'<{INKMASK_WORDS}H',
                             data[inkmask_off:inkmask_off + INKMASK_SIZE])
+    rom_off = inkmask_off + INKMASK_SIZE
+    rom = data[rom_off:rom_off + ROM_SIZE]
+    sound_off = rom_off + ROM_SIZE
+    sound = data[sound_off:sound_off + SOUND_SIZE]
 
     return {
         'version': version,
@@ -214,6 +245,8 @@ def parse_pack(data):
         'geotab': list(geotab),
         'pixmap': list(pixmap),
         'inkmask': list(inkmask),
+        'rom': bytes(rom),
+        'sound': bytes(sound),
     }
 
 

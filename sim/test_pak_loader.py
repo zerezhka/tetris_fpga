@@ -119,6 +119,18 @@ def check_profile(name):
         n_mismatch = sum(1 for a, b in zip(got_inkmask, expected['inkmask']) if a != b)
         errors.append(f'inkmask mismatch ({n_mismatch}/{len(expected["inkmask"])} words)')
 
+    got_rom = csv_ints(got['rom'])
+    exp_rom = list(expected['rom'])
+    if got_rom != exp_rom:
+        n_mismatch = sum(1 for a, b in zip(got_rom, exp_rom) if a != b)
+        errors.append(f'rom mismatch ({n_mismatch}/{len(exp_rom)} bytes)')
+
+    got_sound = csv_ints(got['sound'])
+    exp_sound = list(expected['sound'])
+    if got_sound != exp_sound:
+        n_mismatch = sum(1 for a, b in zip(got_sound, exp_sound) if a != b)
+        errors.append(f'sound mismatch ({n_mismatch}/{len(exp_sound)} bytes)')
+
     return errors
 
 
