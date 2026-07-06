@@ -48,22 +48,23 @@ localparam CONF_STR = {
 	"-;",
 	// Explicit F-indices: without a digit, Main_MiSTer sends menusub+1 as
 	// ioctl_index (menu.cpp MENU_GENERIC_MAIN), i.e. whatever row the entry
-	// happens to sit on — pin them so the download decoder below can rely
-	// on 1=.bin / 2=.sro regardless of menu layout. Extension fields are
-	// split into 3-char chunks by Main — "SROM" would parse as two
-	// extensions "SRO"+"M" and .srom files never matched the file browser,
-	// so sound ROMs on the SD card are named .sro.
+	// happens to sit on — the digit PINS ioctl_index to it regardless of
+	// row, so 1=.bin / 2=.sro / 3=.pak hold no matter the menu order and
+	// the download decoder + .mgl (which validate these indices) don't care
+	// that PAK is listed first here. Extension fields are split into 3-char
+	// chunks by Main — "SROM" would parse as "SRO"+"M" and .srom files never
+	// matched the browser, so sound ROMs on the SD card are named .sro.
 	// FC = "remember last loaded" (Main_MiSTer auto-reloads the file for this
-	// index on core start) — so the user doesn't re-pick BIN/SRO/PAK every
-	// launch. The index digit stays right after FC ("FC1"), which .mgl still
-	// validates load indices against; 3-char extension fields are unchanged.
-	"FC1,BIN,Load ROM;",
-	"FC2,SRO,Load Sound ROM;",
-	// Device pack (plan-device-packs.md): face + profile in one file,
-	// streamed in and unpacked by ht943_pak_loader below (ioctl_index
-	// 3). Overrides the CRC-autodetect fallback profile once loaded —
-	// see PROFILE AUTODETECT / CONFIGURATION and pak_loaded below.
-	"FC3,PAK,Load Device;",
+	// index on core start) — so the user doesn't re-pick every launch.
+	//
+	// PAK is listed FIRST: as of v3 a .pak is a self-contained cartridge
+	// (program + sound + face in one file, see plan-cartridge-pak-v3.md), so
+	// it's the primary 1-click load. BIN/SRO stay below as the raw/homebrew
+	// path (a bare program ROM, optional sound) — index digits keep them at
+	// ioctl_index 1/2 even though they now sit under PAK.
+	"FC3,PAK,Load Cartridge;",
+	"FC1,BIN,Load ROM (raw);",
+	"FC2,SRO,Load Sound ROM (raw);",
 	"-;",
 	// O68 = status bits [8:6]. NOT O01: bit 0 is the T0/R0 Reset button —
 	// with the profile on bits [1:0], selecting profile 1 or 3 held the
