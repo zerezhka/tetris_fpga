@@ -339,7 +339,7 @@ that's still verified separately by Phase 5's `sim/render_compare.py`.)
 | LCD segment renderer | `rtl/ht943_lcd.sv` reads a per-profile pixel→RAM-bit map (`rtl/assets/*_pix.hex`, from `tools/extract_segments_mask.py` coverage-sampling each ROM's face SVG) through the core's debug RAM port | ✅ done, **verified on hardware**; validated statically by `sim/test_lcd_assets.py` (in regression) |
 | Audio output | `rtl/ht943_audio.sv` synthesizes the real tone frequency per sound tick (`HT4BITsound._get_freq`'s formula, `rtl/lfsr2div.svh` shared with the core) into `audio_out` | ✅ RTL done, ❌ not yet heard on hardware |
 | Input mapping | Each profile's real button→pin layout (from the same generator, including buttons that share one physical pin) mapped onto a standard MiSTer joystick; `J1,Fire,Start,Sound,OnOff,Pause` in CONF_STR | ✅ done, **playable on hardware** (E88 tetris) |
-| Savestates | MiSTer framework | ❌ not started |
+| Savestates | ioctl save-channel (no SS framework in this sys/) — `.sav` F4 load + OSD-gated autosave, see `plan-savestates.md` | ✅ **done** (2026-07-07, sim-proven bit-exact roundtrip, load-path verified on hardware) |
 | Quartus build (fit/timing closure) | Quartus 17.0 | ✅ **done** — fits DE10-Nano, chip-wide timing met (see git history 31f6ed3..f1ee0c1 for the multicycle/clock-groups/M10K-slicing saga) |
 | Real DE10-Nano hardware bring-up | — | ✅ **E88_8in1 plays end-to-end over HDMI** (2026-07-04): ROM load via OSD, correct speed (ce paced by per-instruction `ex_cycles`), full LCD, joystick input |
 
@@ -358,7 +358,11 @@ that's still verified separately by Phase 5's `sim/render_compare.py`.)
       `/media/fat/_Console/HT943_YYYYMMDD.rbf` (not bare `/media/fat/HT943.rbf`).
       The MiSTer core selector parses the version from the `_YYYYMMDD` filename
       suffix — without it the selector shows `--.--.--` instead of a version.
-- [ ] **Graphics polish**: "not perfect but decent" — the 120×280 raster
+- [x] **Graphics polish** — resolved by the fine-mask renderer
+      (`plan-fine-mask-renderer.md`, LIVE since the 2026-07-06 rebuild):
+      bricks drawn procedurally from a geometry table, non-brick shapes from
+      a 3× ink mask sampled off the SVG. Original notes kept below for
+      history. — the 120×280 raster
       quantizes the ~1px SVG brick outlines; consider a higher-res raster
       (M10K budget allows ~2× in one dimension, not both, for all 4 maps) or
       procedurally-generated segment shapes instead of SVG rasterization
@@ -372,8 +376,10 @@ that's still verified separately by Phase 5's `sim/render_compare.py`.)
 - [ ] **Sound**: `ht943_audio` output not yet confirmed audible on hardware.
       (One suspect eliminated 2026-07-04: `.srom` files never matched the
       OSD file browser — F-entry extensions are 3-char chunks — so a sound
-      ROM may simply never have been loaded. Files renamed to `.sro`.)
-- [ ] **Savestates**: not started.
+      ROM may simply never have been loaded. Files renamed to `.sro`; since
+      v3 the sound ROM ships inside the `.pak` cartridge.)
+- [x] **Savestates**: done — see `plan-savestates.md` (`.sav` load + OSD
+      autosave, deployed 2026-07-07).
 
 #### UX roadmap (one-click launch instead of the 3-step dance)
 
@@ -381,10 +387,13 @@ Current flow — OSD → ROM profile → Load ROM → Load Sound ROM — is thre
 manual steps and silently wrong if the profile doesn't match the ROM.
 Planned fixes, cheap-to-right:
 
-- [ ] **Remember last files (`FC1`/`FC2`)**: adding the `C` flag to the two
-      F-entries makes Main_MiSTer remember the last selected `.bin`/`.sro`
-      and auto-reload them on every core start. One char per entry in
-      CONF_STR, no core logic.
+- [x] **Remember last files (`FC1`/`FC2`/`FC3`)**: done — the `C` flag on
+      the F-entries makes Main_MiSTer remember the last selected
+      `.pak`/`.bin`/`.sro` and auto-reload them on every core start.
+      (`F4,SAV` is deliberately plain `F`: the remembered file is global,
+      so it would inject the previous game's savestate into a different
+      cartridge.) Superseded in spirit by the v3 cartridge pak — one file
+      is the whole game (`plan-cartridge-pak-v3.md`).
 - [x] **Profile autodetect from ROM content** (hardware-verified
       2026-07-04): the wrapper CRC32s the .bin during ioctl download
       and matches `PROFILE_ROM_CRC32` (generated from the real dumps);

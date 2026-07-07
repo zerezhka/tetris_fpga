@@ -1,3 +1,8 @@
+> **Архивный research-отчёт (до старта проекта).** Часть выводов устарела:
+> реальные mask-ROM дампы HT-943 **доступны** в BrickEmuPy (см.
+> `brickgame-fpga-roadmap.md` §1.1), и этот репозиторий уже гоняет их на
+> живом MiSTer. Оставлен как справочник по семейству железа.
+
 Brick Game / "9999 in 1" handheld reverse engineering research has progressed significantly since 2023. The most common classic units are built around a **Holtek HT1130/HT1190 4-bit microcontroller** with **~3KB mask ROM**, **160-384 bytes RAM**, a **COM/SEG multiplexed LCD** (up to 1020 segments), and **1-bit piezo buzzer audio**. MAME has preliminary emulation support via the `ht1130` CPU core and `hh_ht11xx.cpp` driver, while the **BrickEmuPy** project (azya52) provides the most advanced standalone emulator supporting 50+ handheld variants across multiple chip families. **No original ROM dumps are publicly available** — all existing emulators use reconstructed firmware or high-level simulation. For FPGA implementation, the CPU architecture is now sufficiently documented to begin implementation, but ROM acquisition remains the critical blocker.
 
 ---
